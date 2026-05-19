@@ -1,0 +1,21 @@
+AI/ML
+
+Python
+OpenCV
+MediaPipe
+NumPy
+Pandas
+Scikit-learn
+Backend
+
+FastAPI
+Frontend
+
+Streamlit
+Database
+
+SQLite
+Deployment
+Render
+
+This version can be built FAST.
