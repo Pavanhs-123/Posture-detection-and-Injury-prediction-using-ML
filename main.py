@@ -50,8 +50,6 @@ if not cap.isOpened():
 
 show_preview = os.environ.get("SHOW_PREVIEW") == "1"
 headless_mode = not show_preview
-max_frames = 30 if headless_mode else None
-frame_count = 0
 
 if headless_mode:
     print("Running in headless mode: set SHOW_PREVIEW=1 to open the preview window.")
@@ -97,8 +95,6 @@ def calculate_angle(a, b, c):
 
 with PoseLandmarker.create_from_options(options) as landmarker:
     while True:
-        frame_count += 1
-
         success, frame = cap.read()
 
         if not success:
@@ -183,9 +179,6 @@ with PoseLandmarker.create_from_options(options) as landmarker:
             # Press Q to Quit
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
-
-        if max_frames is not None and frame_count >= max_frames:
-            break
 # ================================
 # Cleanup 
 # ================================
