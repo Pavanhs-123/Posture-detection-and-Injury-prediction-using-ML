@@ -48,7 +48,7 @@ cap = cv2.VideoCapture(0)
 if not cap.isOpened():
     raise RuntimeError("Unable to open webcam 0")
 
-show_preview = os.environ.get("SHOW_PREVIEW") == "1"
+show_preview = os.environ.get("SHOW_PREVIEW", "1") != "0"
 headless_mode = not show_preview
 
 if headless_mode:
