@@ -1,14 +1,14 @@
-# Posture Detection and Injury Risk Prediction
+# Posture Detection and Injury Dataset Builder
 
-This project uses a webcam, MediaPipe pose landmarks, and angle-based features to detect posture and generate a real-time injury-risk score and feedback.
+This project now focuses on building an unbiased labeled dataset from MediaPipe pose features. The rule-based injury scorer has been removed.
 
 ## What it does
 
-- Captures webcam frames and detects the body pose in real time.
-- Measures knee and shoulder angles.
-- Calculates a simple real-time injury risk score with LOW, MEDIUM, and HIGH levels.
-- Draws the detected landmarks on the preview window when enabled.
-- Appends the angles, risk score, and feedback to `pose_data.csv` for later analysis or model training.
+- Captures webcam frames in `main.py` for live pose preview only.
+- Extracts MediaPipe pose landmarks and body angles without any rule-based injury scoring.
+- Samples a selected video clip in `dataset_builder.py` using a start time, stop time, and target frames per second.
+- Shows each sampled frame beside its extracted pose features so you can assign a label frame by frame.
+- Saves the labeled pose features to `pose_data.csv` for later model training and testing.
 
 ## Requirements
 
@@ -26,7 +26,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Run
+## Run the live preview
 
 Preview mode is the default:
 
@@ -55,50 +55,54 @@ Useful options:
 
 ## Dataset Creation Tool
 
-Use `dataset_builder.py` to convert one badminton video into labeled training data.
+Use `dataset_builder.py` to turn a clip into labeled pose-feature rows.
 
 ### Features
 
 - Loads one video file.
-- Auto-detects movement segments from landmark motion, or lets you enter manual frame ranges.
-- Extracts per-frame measurements: knee angle, elbow angle, torso lean, and movement score.
-- Plays each segment with overlayed measurements.
-- Lets you manually label each segment (low, medium, high, or custom).
-- Saves all labeled rows to CSV automatically.
+- Accepts a clip start time, stop time, and target sampling FPS.
+- Extracts per-frame pose features with MediaPipe.
+- Shows the video frame and pose measurements side by side.
+- Lets you label each frame as low, medium, high, or custom.
+- Saves the frame-level label and pose features directly to CSV.
 
 ### Run
 
 ```bash
-python dataset_builder.py --video /path/to/badminton_video.mp4 --output-csv movement_dataset.csv
+python dataset_builder.py --video /path/to/badminton_video.mp4 --start-time 12 --end-time 24 --sample-fps 5
 ```
 
-Manual segment mode:
+If you want prompts instead of command-line values, omit the optional inputs:
 
 ```bash
-python dataset_builder.py --video /path/to/badminton_video.mp4 --manual-select
+python dataset_builder.py --video /path/to/badminton_video.mp4
 ```
 
 Useful options:
 
-- `--playback-speed 0.75` to slow preview playback.
-- `--output-csv data/movement_dataset.csv` to save into a data folder.
+- `--output-csv pose_data.csv` to choose the CSV file.
+- `--append` to keep adding rows to an existing CSV.
 
 ### Labeling flow
 
-1. The script processes the video and computes frame-level metrics.
-2. It previews each movement segment in a window.
-3. In terminal, choose label options:
+1. The script loads the selected clip range from the video.
+2. It samples frames at the requested frames per second.
+3. Each sampled frame is shown beside the MediaPipe angles and torso lean.
+4. In terminal, choose a label for that frame:
 	- `1` low
 	- `2` medium
 	- `3` high
-	- `c` custom label
-	- `e` edit frame range
-	- `s` skip segment
-	- `q` quit and save what is done
+	- `4` custom
 
 Output CSV columns:
 
-- `video_name`, `segment_id`, `segment_start_frame`, `segment_end_frame`
-- `frame_index`, `timestamp_sec`
-- `knee_angle`, `elbow_angle`, `torso_lean`, `movement_score`
+- `video_name`, `clip_start_sec`, `clip_end_sec`, `source_fps`, `sample_fps`
+- `frame_index`, `timestamp_sec`, `label`
+- `left_knee_angle`, `right_knee_angle`, `knee_angle`
+- `left_elbow_angle`, `right_elbow_angle`, `elbow_angle`, `torso_lean`
+- `pose_detected`
+
+## Training direction
+
+The next model should be trained on the labeled pose features from `pose_data.csv`, not on the old rule-based injury score. That keeps the dataset unbiased and lets us compare model choices cleanly after labeling is complete.
 - `label`

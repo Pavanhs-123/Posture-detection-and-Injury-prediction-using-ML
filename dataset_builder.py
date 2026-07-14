@@ -1,165 +1,270 @@
 import argparse
 import csv
-from dataclasses import dataclass
 from pathlib import Path
-import urllib.request
 
 import cv2
 import mediapipe as mp
 import numpy as np
 
-MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-    "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
-)
-MODEL_PATH = Path(__file__).with_name("pose_landmarker_lite.task")
+from pose_analysis import MODEL_PATH, PoseFeatures, ensure_model_file, extract_pose_features
 
 
-@dataclass
-class FrameMetrics:
-    frame_index: int
-    timestamp_sec: float
-    knee_angle: float | None
-    elbow_angle: float | None
-    torso_lean: float | None
-    movement_score: float
-
-
-@dataclass
-class Segment:
-    start_frame: int
-    end_frame: int
-
-
-def ensure_model_file() -> None:
-    if MODEL_PATH.exists():
-        return
-
-    print(f"Downloading pose model to {MODEL_PATH}...")
-    with urllib.request.urlopen(MODEL_URL) as response, MODEL_PATH.open("wb") as model_file:
-        model_file.write(response.read())
+FIELDNAMES = [
+    "video_name",
+    "clip_start_sec",
+    "clip_end_sec",
+    "source_fps",
+    "sample_fps",
+    "frame_index",
+    "timestamp_sec",
+    "label",
+    "left_knee_angle",
+    "right_knee_angle",
+    "knee_angle",
+    "left_elbow_angle",
+    "right_elbow_angle",
+    "elbow_angle",
+    "torso_lean",
+    "pose_detected",
+]
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Build a labeled badminton movement dataset from a single video"
-    )
-    parser.add_argument("--video", required=True, help="Path to input video")
+    parser = argparse.ArgumentParser(description="Build a labeled pose dataset from a video clip")
+    parser.add_argument("--video", required=True, help="Path to the input video")
     parser.add_argument(
         "--output-csv",
-        default="movement_dataset.csv",
-        help="Path to output CSV",
+        default="pose_data.csv",
+        help="CSV file to store labeled frame data",
     )
+    parser.add_argument("--start-time", type=float, help="Clip start time in seconds")
+    parser.add_argument("--end-time", type=float, help="Clip end time in seconds")
     parser.add_argument(
-        "--manual-select",
-        action="store_true",
-        help="Skip auto detection and provide movement ranges manually",
-    )
-    parser.add_argument(
-        "--playback-speed",
+        "--sample-fps",
         type=float,
-        default=1.0,
-        help="Playback speed for segment preview (1.0 is real time)",
+        help="Number of frames per second to label from the selected clip",
+    )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="Append to an existing CSV instead of overwriting it",
     )
     return parser.parse_args()
 
 
-def calculate_angle(a: list[float], b: list[float], c: list[float]) -> float:
-    a_vec = np.array(a)
-    b_vec = np.array(b)
-    c_vec = np.array(c)
+def prompt_float(prompt: str, minimum: float | None = None) -> float:
+    while True:
+        raw = input(prompt).strip()
+        try:
+            value = float(raw)
+        except ValueError:
+            print("Please enter a valid number.")
+            continue
 
-    radians = np.arctan2(c_vec[1] - b_vec[1], c_vec[0] - b_vec[0]) - np.arctan2(
-        a_vec[1] - b_vec[1], a_vec[0] - b_vec[0]
-    )
-    angle = abs(radians * 180.0 / np.pi)
+        if minimum is not None and value < minimum:
+            print(f"Please enter a value greater than or equal to {minimum}.")
+            continue
 
-    if angle > 180:
-        angle = 360 - angle
-
-    return float(angle)
-
-
-def average_angles(values: list[float | None]) -> float | None:
-    valid = [value for value in values if value is not None]
-    if not valid:
-        return None
-    return float(sum(valid) / len(valid))
+        return value
 
 
-def get_point(landmarks: list, idx) -> list[float]:
-    point = landmarks[idx]
-    return [point.x, point.y]
+def format_value(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.2f}"
 
 
-def get_knee_angle(landmarks: list, pose_landmark) -> float | None:
-    left = calculate_angle(
-        get_point(landmarks, pose_landmark.LEFT_HIP),
-        get_point(landmarks, pose_landmark.LEFT_KNEE),
-        get_point(landmarks, pose_landmark.LEFT_ANKLE),
-    )
-    right = calculate_angle(
-        get_point(landmarks, pose_landmark.RIGHT_HIP),
-        get_point(landmarks, pose_landmark.RIGHT_KNEE),
-        get_point(landmarks, pose_landmark.RIGHT_ANKLE),
-    )
-    return average_angles([left, right])
+def normalize_label(choice: str) -> str | None:
+    choice = choice.strip().lower()
+    if choice == "1":
+        return "low"
+    if choice == "2":
+        return "medium"
+    if choice == "3":
+        return "high"
+    if choice == "4":
+        custom_label = input("Enter custom label: ").strip()
+        return custom_label or None
+    if choice in {"q", "quit"}:
+        return "__quit__"
+    return None
 
 
-def get_elbow_angle(landmarks: list, pose_landmark) -> float | None:
-    left = calculate_angle(
-        get_point(landmarks, pose_landmark.LEFT_SHOULDER),
-        get_point(landmarks, pose_landmark.LEFT_ELBOW),
-        get_point(landmarks, pose_landmark.LEFT_WRIST),
-    )
-    right = calculate_angle(
-        get_point(landmarks, pose_landmark.RIGHT_SHOULDER),
-        get_point(landmarks, pose_landmark.RIGHT_ELBOW),
-        get_point(landmarks, pose_landmark.RIGHT_WRIST),
-    )
-    return average_angles([left, right])
+def draw_marker(frame, point, color, radius=5):
+    cv2.circle(frame, point, radius, color, -1)
 
 
-def get_torso_lean(landmarks: list, pose_landmark) -> float | None:
-    left_shoulder = np.array(get_point(landmarks, pose_landmark.LEFT_SHOULDER))
-    right_shoulder = np.array(get_point(landmarks, pose_landmark.RIGHT_SHOULDER))
-    left_hip = np.array(get_point(landmarks, pose_landmark.LEFT_HIP))
-    right_hip = np.array(get_point(landmarks, pose_landmark.RIGHT_HIP))
+def draw_pose_skeleton(frame, landmarks, pose_landmark) -> None:
+    height, width = frame.shape[:2]
 
-    shoulder_center = (left_shoulder + right_shoulder) / 2.0
-    hip_center = (left_hip + right_hip) / 2.0
-    torso_vector = shoulder_center - hip_center
+    points = {
+        "left_hip": (int(landmarks[pose_landmark.LEFT_HIP].x * width), int(landmarks[pose_landmark.LEFT_HIP].y * height)),
+        "left_knee": (int(landmarks[pose_landmark.LEFT_KNEE].x * width), int(landmarks[pose_landmark.LEFT_KNEE].y * height)),
+        "left_ankle": (int(landmarks[pose_landmark.LEFT_ANKLE].x * width), int(landmarks[pose_landmark.LEFT_ANKLE].y * height)),
+        "left_shoulder": (int(landmarks[pose_landmark.LEFT_SHOULDER].x * width), int(landmarks[pose_landmark.LEFT_SHOULDER].y * height)),
+        "left_elbow": (int(landmarks[pose_landmark.LEFT_ELBOW].x * width), int(landmarks[pose_landmark.LEFT_ELBOW].y * height)),
+        "left_wrist": (int(landmarks[pose_landmark.LEFT_WRIST].x * width), int(landmarks[pose_landmark.LEFT_WRIST].y * height)),
+        "right_hip": (int(landmarks[pose_landmark.RIGHT_HIP].x * width), int(landmarks[pose_landmark.RIGHT_HIP].y * height)),
+        "right_knee": (int(landmarks[pose_landmark.RIGHT_KNEE].x * width), int(landmarks[pose_landmark.RIGHT_KNEE].y * height)),
+        "right_ankle": (int(landmarks[pose_landmark.RIGHT_ANKLE].x * width), int(landmarks[pose_landmark.RIGHT_ANKLE].y * height)),
+        "right_shoulder": (int(landmarks[pose_landmark.RIGHT_SHOULDER].x * width), int(landmarks[pose_landmark.RIGHT_SHOULDER].y * height)),
+        "right_elbow": (int(landmarks[pose_landmark.RIGHT_ELBOW].x * width), int(landmarks[pose_landmark.RIGHT_ELBOW].y * height)),
+        "right_wrist": (int(landmarks[pose_landmark.RIGHT_WRIST].x * width), int(landmarks[pose_landmark.RIGHT_WRIST].y * height)),
+    }
 
-    torso_length = np.linalg.norm(torso_vector)
-    if torso_length < 1e-6:
-        return None
+    for point in points.values():
+        draw_marker(frame, point, (0, 255, 0))
 
-    # Lean is angle from vertical axis in image coordinates.
-    lean = np.degrees(np.arctan2(abs(torso_vector[0]), abs(torso_vector[1]) + 1e-6))
-    return float(lean)
+    line_color = (255, 0, 0)
+    cv2.line(frame, points["left_shoulder"], points["left_elbow"], line_color, 2)
+    cv2.line(frame, points["left_elbow"], points["left_wrist"], line_color, 2)
+    cv2.line(frame, points["left_hip"], points["left_knee"], line_color, 2)
+    cv2.line(frame, points["left_knee"], points["left_ankle"], line_color, 2)
+    cv2.line(frame, points["right_shoulder"], points["right_elbow"], line_color, 2)
+    cv2.line(frame, points["right_elbow"], points["right_wrist"], line_color, 2)
+    cv2.line(frame, points["right_hip"], points["right_knee"], line_color, 2)
+    cv2.line(frame, points["right_knee"], points["right_ankle"], line_color, 2)
 
 
-def extract_motion_points(landmarks: list, pose_landmark) -> np.ndarray:
-    indices = [
-        pose_landmark.LEFT_SHOULDER,
-        pose_landmark.RIGHT_SHOULDER,
-        pose_landmark.LEFT_ELBOW,
-        pose_landmark.RIGHT_ELBOW,
-        pose_landmark.LEFT_WRIST,
-        pose_landmark.RIGHT_WRIST,
-        pose_landmark.LEFT_HIP,
-        pose_landmark.RIGHT_HIP,
-        pose_landmark.LEFT_KNEE,
-        pose_landmark.RIGHT_KNEE,
-        pose_landmark.LEFT_ANKLE,
-        pose_landmark.RIGHT_ANKLE,
+def fit_frame_for_display(frame, max_width: int = 920, max_height: int = 640) -> np.ndarray:
+    height, width = frame.shape[:2]
+    scale = min(max_width / max(1, width), max_height / max(1, height), 1.0)
+    if scale == 1.0:
+        return frame
+    new_size = (int(width * scale), int(height * scale))
+    return cv2.resize(frame, new_size, interpolation=cv2.INTER_AREA)
+
+
+def compose_preview(frame: np.ndarray, features: PoseFeatures, frame_index: int, timestamp_sec: float, sample_fps: float) -> np.ndarray:
+    preview_frame = fit_frame_for_display(frame)
+    height = preview_frame.shape[0]
+    panel_width = 420
+    panel = np.zeros((height, panel_width, 3), dtype=np.uint8)
+
+    header_lines = [
+        f"Frame {frame_index}",
+        f"Time: {timestamp_sec:.2f}s",
+        f"Target FPS: {sample_fps:.2f}",
+        "",
+        "Angles",
+        f"L knee: {format_value(features.left_knee_angle)}",
+        f"R knee: {format_value(features.right_knee_angle)}",
+        f"Avg knee: {format_value(features.knee_angle)}",
+        f"L elbow: {format_value(features.left_elbow_angle)}",
+        f"R elbow: {format_value(features.right_elbow_angle)}",
+        f"Avg elbow: {format_value(features.elbow_angle)}",
+        f"Torso lean: {format_value(features.torso_lean)}",
+        "",
+        "Label keys",
+        "1 = Low",
+        "2 = Medium",
+        "3 = High",
+        "4 = Custom",
     ]
 
-    points = [get_point(landmarks, idx) for idx in indices]
-    return np.array(points, dtype=np.float32)
+    y = 40
+    for line in header_lines:
+        if not line:
+            y += 18
+            continue
+        cv2.putText(panel, line, (18, y), cv2.FONT_HERSHEY_SIMPLEX, 0.64, (240, 240, 240), 2)
+        y += 32
+
+    return cv2.hconcat([preview_frame, panel])
 
 
-def process_video(video_path: Path) -> tuple[list[FrameMetrics], float, int]:
+def prompt_label(frame_index: int, timestamp_sec: float, features: PoseFeatures) -> str:
+    print(
+        f"\nFrame {frame_index} at {timestamp_sec:.2f}s | "
+        f"knee={format_value(features.knee_angle)} "
+        f"elbow={format_value(features.elbow_angle)} "
+        f"torso={format_value(features.torso_lean)}"
+    )
+    print("Choose label: 1=Low, 2=Medium, 3=High, 4=Custom")
+
+    while True:
+        choice = input("Label: ").strip()
+        label = normalize_label(choice)
+        if label is None:
+            print("Invalid choice. Use 1, 2, 3, or 4.")
+            continue
+        return label
+
+
+def prepare_writer(output_csv: Path, append: bool) -> tuple[csv.DictWriter, object]:
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    file_exists = output_csv.exists()
+    mode = "a" if append and file_exists else "w"
+    handle = output_csv.open(mode, newline="")
+    writer = csv.DictWriter(handle, fieldnames=FIELDNAMES)
+
+    if mode == "w" or output_csv.stat().st_size == 0:
+        writer.writeheader()
+
+    return writer, handle
+
+
+def build_row(
+    video_path: Path,
+    clip_start_sec: float,
+    clip_end_sec: float,
+    source_fps: float,
+    sample_fps: float,
+    frame_index: int,
+    timestamp_sec: float,
+    label: str,
+    features: PoseFeatures,
+) -> dict[str, object]:
+    pose_detected = any(
+        value is not None
+        for value in (
+            features.left_knee_angle,
+            features.right_knee_angle,
+            features.knee_angle,
+            features.left_elbow_angle,
+            features.right_elbow_angle,
+            features.elbow_angle,
+            features.torso_lean,
+        )
+    )
+
+    return {
+        "video_name": video_path.name,
+        "clip_start_sec": round(clip_start_sec, 3),
+        "clip_end_sec": round(clip_end_sec, 3),
+        "source_fps": round(source_fps, 3),
+        "sample_fps": round(sample_fps, 3),
+        "frame_index": frame_index,
+        "timestamp_sec": round(timestamp_sec, 3),
+        "label": label,
+        "left_knee_angle": None if features.left_knee_angle is None else round(features.left_knee_angle, 3),
+        "right_knee_angle": None if features.right_knee_angle is None else round(features.right_knee_angle, 3),
+        "knee_angle": None if features.knee_angle is None else round(features.knee_angle, 3),
+        "left_elbow_angle": None if features.left_elbow_angle is None else round(features.left_elbow_angle, 3),
+        "right_elbow_angle": None if features.right_elbow_angle is None else round(features.right_elbow_angle, 3),
+        "elbow_angle": None if features.elbow_angle is None else round(features.elbow_angle, 3),
+        "torso_lean": None if features.torso_lean is None else round(features.torso_lean, 3),
+        "pose_detected": int(pose_detected),
+    }
+
+
+def main() -> None:
+    args = parse_args()
+    video_path = Path(args.video).expanduser().resolve()
+    output_csv = Path(args.output_csv).expanduser().resolve()
+
+    if not video_path.exists():
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+
+    start_time = args.start_time if args.start_time is not None else prompt_float("Start time in seconds: ", 0.0)
+    end_time = args.end_time if args.end_time is not None else prompt_float("Stop time in seconds: ", 0.0)
+    sample_fps = args.sample_fps if args.sample_fps is not None else prompt_float("Frames per second to label: ", 0.1)
+
+    if end_time <= start_time:
+        raise ValueError("Stop time must be greater than start time.")
+    if sample_fps <= 0:
+        raise ValueError("Frames per second must be greater than zero.")
+
+    ensure_model_file()
+
     BaseOptions = mp.tasks.BaseOptions
     PoseLandmarker = mp.tasks.vision.PoseLandmarker
     PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
@@ -179,376 +284,82 @@ def process_video(video_path: Path) -> tuple[list[FrameMetrics], float, int]:
     if not cap.isOpened():
         raise RuntimeError(f"Unable to open video: {video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0:
-        fps = 30.0
+    source_fps = cap.get(cv2.CAP_PROP_FPS)
+    if source_fps <= 0:
+        source_fps = 30.0
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    frame_metrics: list[FrameMetrics] = []
-    prev_motion_points: np.ndarray | None = None
-
-    with PoseLandmarker.create_from_options(options) as landmarker:
-        frame_index = 0
-        while True:
-            success, frame = cap.read()
-            if not success:
-                break
-
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-            timestamp_ms = int((frame_index / fps) * 1000)
-            result = landmarker.detect_for_video(mp_image, timestamp_ms)
-
-            knee_angle = None
-            elbow_angle = None
-            torso_lean = None
-            movement_score = 0.0
-
-            if result.pose_landmarks:
-                landmarks = result.pose_landmarks[0]
-                knee_angle = get_knee_angle(landmarks, PoseLandmark)
-                elbow_angle = get_elbow_angle(landmarks, PoseLandmark)
-                torso_lean = get_torso_lean(landmarks, PoseLandmark)
-
-                current_motion_points = extract_motion_points(landmarks, PoseLandmark)
-                if prev_motion_points is not None:
-                    delta = np.linalg.norm(current_motion_points - prev_motion_points, axis=1)
-                    movement_score = float(np.mean(delta))
-                prev_motion_points = current_motion_points
-            else:
-                prev_motion_points = None
-
-            frame_metrics.append(
-                FrameMetrics(
-                    frame_index=frame_index,
-                    timestamp_sec=frame_index / fps,
-                    knee_angle=knee_angle,
-                    elbow_angle=elbow_angle,
-                    torso_lean=torso_lean,
-                    movement_score=movement_score,
-                )
-            )
-            frame_index += 1
-
-    cap.release()
-    return frame_metrics, fps, total_frames
-
-
-def detect_segments_auto(frame_metrics: list[FrameMetrics], fps: float) -> list[Segment]:
-    if not frame_metrics:
-        return []
-
-    movement = np.array([metric.movement_score for metric in frame_metrics], dtype=np.float32)
-    window = 5
-    smooth_kernel = np.ones(window, dtype=np.float32) / window
-    smoothed = np.convolve(movement, smooth_kernel, mode="same")
-
-    threshold = max(0.008, float(smoothed.mean() + 0.8 * smoothed.std()))
-    active = smoothed > threshold
-
-    min_length = max(8, int(0.25 * fps))
-    pad = max(2, int(0.15 * fps))
-
-    segments: list[Segment] = []
-    run_start = None
-
-    for idx, is_active in enumerate(active):
-        if is_active and run_start is None:
-            run_start = idx
-        elif not is_active and run_start is not None:
-            run_end = idx - 1
-            if run_end - run_start + 1 >= min_length:
-                start = max(0, run_start - pad)
-                end = min(len(frame_metrics) - 1, run_end + pad)
-                segments.append(Segment(start_frame=start, end_frame=end))
-            run_start = None
-
-    if run_start is not None:
-        run_end = len(active) - 1
-        if run_end - run_start + 1 >= min_length:
-            start = max(0, run_start - pad)
-            end = min(len(frame_metrics) - 1, run_end + pad)
-            segments.append(Segment(start_frame=start, end_frame=end))
-
-    merged: list[Segment] = []
-    for segment in segments:
-        if not merged:
-            merged.append(segment)
-            continue
-
-        last = merged[-1]
-        if segment.start_frame <= last.end_frame + 1:
-            last.end_frame = max(last.end_frame, segment.end_frame)
-        else:
-            merged.append(segment)
-
-    return merged
-
-
-def parse_manual_segments(total_frames: int) -> list[Segment]:
-    print("Manual segment selection enabled.")
-    print("Enter ranges like: 120-200,260-320,400-450")
-    print(f"Frame range available: 0 to {max(0, total_frames - 1)}")
-
-    while True:
-        raw = input("Movement segments: ").strip()
-        if not raw:
-            print("Please enter at least one range.")
-            continue
-
-        try:
-            segments: list[Segment] = []
-            chunks = [chunk.strip() for chunk in raw.split(",") if chunk.strip()]
-            for chunk in chunks:
-                start_text, end_text = chunk.split("-", maxsplit=1)
-                start = int(start_text)
-                end = int(end_text)
-                if start < 0 or end < 0 or start >= total_frames or end >= total_frames:
-                    raise ValueError("Range out of bounds")
-                if start >= end:
-                    raise ValueError("Start must be smaller than end")
-                segments.append(Segment(start_frame=start, end_frame=end))
-            return segments
-        except ValueError as exc:
-            print(f"Invalid format: {exc}")
-
-
-def play_segment(
-    cap: cv2.VideoCapture,
-    segment: Segment,
-    frame_metrics: list[FrameMetrics],
-    fps: float,
-    playback_speed: float,
-) -> bool:
-    cap.set(cv2.CAP_PROP_POS_FRAMES, segment.start_frame)
-
-    delay_ms = max(1, int(1000 / max(1e-6, fps * playback_speed)))
-    frame_index = segment.start_frame
-
-    while frame_index <= segment.end_frame:
-        success, frame = cap.read()
-        if not success:
-            break
-
-        metric = frame_metrics[frame_index]
-        knee_text = "N/A" if metric.knee_angle is None else f"{metric.knee_angle:.1f}"
-        elbow_text = "N/A" if metric.elbow_angle is None else f"{metric.elbow_angle:.1f}"
-        torso_text = "N/A" if metric.torso_lean is None else f"{metric.torso_lean:.1f}"
-
-        cv2.putText(frame, f"Frame: {frame_index}", (20, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-        cv2.putText(frame, f"Knee angle: {knee_text}", (20, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, f"Elbow angle: {elbow_text}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, f"Torso lean: {torso_text}", (20, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-        cv2.putText(frame, f"Motion score: {metric.movement_score:.4f}", (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 215, 255), 2)
-        cv2.putText(frame, "Press q to stop labeling", (20, 195), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 0, 255), 2)
-
-        cv2.imshow("Dataset Builder Preview", frame)
-        key = cv2.waitKey(delay_ms) & 0xFF
-        if key == ord("q"):
-            return True
-
-        frame_index += 1
-
-    return False
-
-
-def summarize_segment(segment: Segment, frame_metrics: list[FrameMetrics]) -> dict[str, float | None]:
-    segment_rows = frame_metrics[segment.start_frame : segment.end_frame + 1]
-
-    def avg(values: list[float | None]) -> float | None:
-        valid = [value for value in values if value is not None]
-        if not valid:
-            return None
-        return round(float(sum(valid) / len(valid)), 3)
-
-    return {
-        "avg_knee": avg([row.knee_angle for row in segment_rows]),
-        "avg_elbow": avg([row.elbow_angle for row in segment_rows]),
-        "avg_torso_lean": avg([row.torso_lean for row in segment_rows]),
-        "avg_motion": round(float(sum(row.movement_score for row in segment_rows) / len(segment_rows)), 6),
-    }
-
-
-def prompt_label(segment_id: int, segment: Segment, summary: dict[str, float | None]) -> tuple[str | None, Segment | None, bool]:
-    print(
-        f"\nSegment {segment_id}: frames {segment.start_frame}-{segment.end_frame} | "
-        f"knee={summary['avg_knee']} elbow={summary['avg_elbow']} "
-        f"torso_lean={summary['avg_torso_lean']} motion={summary['avg_motion']}"
-    )
-    print("Label options: 1=low, 2=medium, 3=high, c=custom text, e=edit range, s=skip, q=quit")
-
-    while True:
-        choice = input("Your choice: ").strip().lower()
-        if choice == "1":
-            return "low", segment, False
-        if choice == "2":
-            return "medium", segment, False
-        if choice == "3":
-            return "high", segment, False
-        if choice == "c":
-            custom = input("Enter custom label: ").strip()
-            if custom:
-                return custom, segment, False
-            print("Custom label cannot be empty.")
-            continue
-        if choice == "e":
-            edited = input("Enter new range start-end: ").strip()
-            try:
-                start_text, end_text = edited.split("-", maxsplit=1)
-                start = int(start_text)
-                end = int(end_text)
-                if start >= end:
-                    print("Start must be smaller than end.")
-                    continue
-                return None, Segment(start_frame=start, end_frame=end), False
-            except ValueError:
-                print("Invalid range format. Use start-end.")
-                continue
-        if choice == "s":
-            return None, segment, False
-        if choice == "q":
-            return None, segment, True
-        print("Invalid input.")
-
-
-def collect_labeled_rows(
-    video_path: Path,
-    frame_metrics: list[FrameMetrics],
-    segments: list[Segment],
-    fps: float,
-    playback_speed: float,
-) -> list[dict[str, object]]:
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"Unable to open video for preview: {video_path}")
-
+    duration_sec = total_frames / source_fps if total_frames > 0 else end_time
+    clip_start_sec = max(0.0, min(start_time, duration_sec))
+    clip_end_sec = max(clip_start_sec, min(end_time, duration_sec))
+    max_frame_index = max(0, total_frames - 1)
+    sample_interval = 1.0 / sample_fps
+    sample_time = clip_start_sec
     rows: list[dict[str, object]] = []
 
+    writer, output_handle = prepare_writer(output_csv, append=args.append)
+
     try:
-        for idx, original_segment in enumerate(segments, start=1):
-            segment = Segment(
-                start_frame=max(0, original_segment.start_frame),
-                end_frame=min(len(frame_metrics) - 1, original_segment.end_frame),
-            )
-
-            while True:
-                should_quit = play_segment(cap, segment, frame_metrics, fps, playback_speed)
-                if should_quit:
-                    print("Stopped by user.")
-                    return rows
-
-                summary = summarize_segment(segment, frame_metrics)
-                label, maybe_segment, quit_requested = prompt_label(idx, segment, summary)
-
-                if quit_requested:
-                    return rows
-
-                if maybe_segment is not None and maybe_segment != segment and label is None:
-                    segment = Segment(
-                        start_frame=max(0, maybe_segment.start_frame),
-                        end_frame=min(len(frame_metrics) - 1, maybe_segment.end_frame),
-                    )
-                    if segment.start_frame >= segment.end_frame:
-                        print("Edited range is invalid after bounds check.")
-                        segment = Segment(
-                            start_frame=max(0, original_segment.start_frame),
-                            end_frame=min(len(frame_metrics) - 1, original_segment.end_frame),
-                        )
-                    continue
-
-                if label is None:
-                    print("Segment skipped.")
+        with PoseLandmarker.create_from_options(options) as landmarker:
+            while sample_time <= clip_end_sec + 1e-9:
+                frame_index = min(max_frame_index, int(round(sample_time * source_fps)))
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+                success, frame = cap.read()
+                if not success:
                     break
 
-                for frame_idx in range(segment.start_frame, segment.end_frame + 1):
-                    metric = frame_metrics[frame_idx]
-                    rows.append(
-                        {
-                            "video_name": video_path.name,
-                            "segment_id": idx,
-                            "segment_start_frame": segment.start_frame,
-                            "segment_end_frame": segment.end_frame,
-                            "frame_index": metric.frame_index,
-                            "timestamp_sec": round(metric.timestamp_sec, 4),
-                            "knee_angle": None if metric.knee_angle is None else round(metric.knee_angle, 3),
-                            "elbow_angle": None if metric.elbow_angle is None else round(metric.elbow_angle, 3),
-                            "torso_lean": None if metric.torso_lean is None else round(metric.torso_lean, 3),
-                            "movement_score": round(metric.movement_score, 6),
-                            "label": label,
-                        }
+                timestamp_sec = frame_index / source_fps
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
+                timestamp_ms = int(timestamp_sec * 1000)
+                result = landmarker.detect_for_video(mp_image, timestamp_ms)
+
+                if result.pose_landmarks:
+                    landmarks = result.pose_landmarks[0]
+                    features = extract_pose_features(landmarks, PoseLandmark)
+                    draw_pose_skeleton(frame, landmarks, PoseLandmark)
+                else:
+                    features = PoseFeatures(
+                        left_knee_angle=None,
+                        right_knee_angle=None,
+                        knee_angle=None,
+                        left_elbow_angle=None,
+                        right_elbow_angle=None,
+                        elbow_angle=None,
+                        torso_lean=None,
                     )
-                print(f"Saved label '{label}' for segment {idx}.")
-                break
+
+                preview = compose_preview(frame, features, frame_index, timestamp_sec, sample_fps)
+                cv2.imshow("Dataset Labeling Preview", preview)
+                cv2.waitKey(1)
+
+                label = prompt_label(frame_index, timestamp_sec, features)
+                if label == "__quit__":
+                    print("Stopped by user.")
+                    break
+
+                row = build_row(
+                    video_path=video_path,
+                    clip_start_sec=clip_start_sec,
+                    clip_end_sec=clip_end_sec,
+                    source_fps=source_fps,
+                    sample_fps=sample_fps,
+                    frame_index=frame_index,
+                    timestamp_sec=timestamp_sec,
+                    label=label,
+                    features=features,
+                )
+                writer.writerow(row)
+                rows.append(row)
+                print(f"Saved frame {frame_index} with label '{label}'.")
+
+                sample_time += sample_interval
     finally:
         cap.release()
+        output_handle.close()
         cv2.destroyAllWindows()
 
-    return rows
-
-
-def write_rows(rows: list[dict[str, object]], output_csv: Path) -> None:
-    output_csv.parent.mkdir(parents=True, exist_ok=True)
-
-    fieldnames = [
-        "video_name",
-        "segment_id",
-        "segment_start_frame",
-        "segment_end_frame",
-        "frame_index",
-        "timestamp_sec",
-        "knee_angle",
-        "elbow_angle",
-        "torso_lean",
-        "movement_score",
-        "label",
-    ]
-
-    file_exists = output_csv.exists()
-
-    with output_csv.open("a", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        if not file_exists or output_csv.stat().st_size == 0:
-            writer.writeheader()
-        writer.writerows(rows)
-
-
-def main() -> None:
-    args = parse_args()
-    video_path = Path(args.video).expanduser().resolve()
-    output_csv = Path(args.output_csv).expanduser().resolve()
-
-    if not video_path.exists():
-        raise FileNotFoundError(f"Video file not found: {video_path}")
-
-    ensure_model_file()
-
-    print("Processing video and extracting measurements...")
-    frame_metrics, fps, total_frames = process_video(video_path)
-    print(f"Processed {len(frame_metrics)} frames at {fps:.2f} FPS.")
-
-    if args.manual_select:
-        segments = parse_manual_segments(total_frames)
-    else:
-        segments = detect_segments_auto(frame_metrics, fps)
-        print(f"Auto-detected {len(segments)} movement segment(s).")
-        if not segments:
-            print("No segments found automatically. Falling back to manual input.")
-            segments = parse_manual_segments(total_frames)
-
-    rows = collect_labeled_rows(
-        video_path=video_path,
-        frame_metrics=frame_metrics,
-        segments=segments,
-        fps=fps,
-        playback_speed=max(0.1, args.playback_speed),
-    )
-
-    if not rows:
-        print("No labeled rows to save.")
-        return
-
-    write_rows(rows, output_csv)
-    print(f"Saved {len(rows)} labeled rows to {output_csv}")
+    print(f"Saved {len(rows)} labeled frame(s) to {output_csv}")
 
 
 if __name__ == "__main__":
