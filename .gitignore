@@ -3,4 +3,7 @@ venv/
 __pycache__/
 *.pyc
 tasks.txt
-
+data/history.db
+data/clips/
+data/landmarks/
+.agents/

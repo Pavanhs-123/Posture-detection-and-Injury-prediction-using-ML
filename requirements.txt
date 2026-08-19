@@ -1,3 +1,6 @@
 mediapipe==0.10.35
 numpy
 opencv-python
+pandas
+scikit-learn
+streamlit
