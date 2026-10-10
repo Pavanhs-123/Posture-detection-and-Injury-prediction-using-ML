@@ -7,3 +7,8 @@ data/history.db
 data/clips/
 data/landmarks/
 .agents/
+
+# Local video datasets and generated analysis
+data/videos/
+data/comparison_2d_3d.csv
+data/dataset.csv

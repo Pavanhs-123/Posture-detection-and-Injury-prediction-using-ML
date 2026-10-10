@@ -52,6 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-time", type=float, help="Sequence start time in seconds")
     parser.add_argument("--end-time", type=float, help="Sequence end time in seconds")
     parser.add_argument("--sample-fps", type=float, default=10.0, help="Frames per second to extract landmarks")
+    parser.add_argument("--candidates-csv", type=str, help="Optional candidates CSV from detect_candidates.py to select pre-detected movement intervals")
     parser.add_argument("--append", action="store_true", default=True, help="Append to existing dataset CSV")
     return parser.parse_args()
 
@@ -67,14 +68,18 @@ def prompt_float(prompt: str, minimum: float | None = None) -> float:
         except ValueError:
             print("Please enter a valid decimal number.")
 
-def prompt_choice(prompt_text: str, options: dict) -> str:
+def prompt_choice(prompt_text: str, options: dict, default_choice: str | None = None) -> str:
     print(prompt_text)
     for k, v in options.items():
-        print(f"  [{k}] {v}")
+        tag = " (Suggested)" if v == default_choice else ""
+        print(f"  [{k}] {v}{tag}")
     print("  [6] Enter custom string")
     
     while True:
-        choice = input("Select: ").strip()
+        prompt_label = f"Select (Enter for {default_choice}): " if default_choice else "Select: "
+        choice = input(prompt_label).strip()
+        if not choice and default_choice:
+            return default_choice
         if choice in options:
             return options[choice]
         elif choice == "6":
@@ -125,9 +130,107 @@ def main() -> None:
     if not video_path.exists():
         raise FileNotFoundError(f"Video file not found at: {video_path}")
 
-    # Prompt for start/end/fps if not specified in CLI
-    start_time = args.start_time if args.start_time is not None else prompt_float("Enter start time in seconds: ", 0.0)
-    end_time = args.end_time if args.end_time is not None else prompt_float("Enter end time in seconds: ", start_time)
+    suggested_movement = None
+    start_time = args.start_time
+    end_time = args.end_time
+
+    # Load candidates if CSV provided
+    if args.candidates_csv and Path(args.candidates_csv).exists() and (start_time is None or end_time is None):
+        cand_path = Path(args.candidates_csv)
+        with open(cand_path, "r") as f:
+            reader = list(csv.DictReader(f))
+
+        # Filter matching video name if applicable
+        video_cands = [r for r in reader if r.get("video_id") == video_path.name]
+        cands_to_show = video_cands if video_cands else reader
+
+        if cands_to_show:
+            print("\n" + "=" * 70)
+            print("🏸 Movement Candidates (Human Review Verification Required):")
+            print("=" * 70)
+            for idx, c in enumerate(cands_to_show, start=1):
+                c_id = c.get("candidate_id", f"cand_{idx}")
+                p_mov = c.get("proposed_movement") or c.get("movement_type", "UNCERTAIN")
+                score = c.get("heuristic_score") or c.get("confidence_score", "N/A")
+                decision = (c.get("human_decision") or "PENDING").upper()
+                r_mov = c.get("reviewed_movement") or "-"
+                status_icon = "✅ ACCEPTED" if decision == "ACCEPT" else ("❌ REJECTED" if decision == "REJECT" else ("❓ UNCERTAIN" if decision == "UNCERTAIN" else "⏳ PENDING"))
+                print(f"  [{idx}] {c_id:<10} | Proposed: {p_mov:<20} | {c['start_time']}s - {c['end_time']}s | Score: {score} | Review: {status_icon} (Confirmed: {r_mov})")
+            print("  [0] Enter manual timing bounds")
+            print("=" * 70)
+
+            while True:
+                sel = input("Select candidate number to label (default: 1, 0 for manual): ").strip()
+                sel_idx = int(sel) if sel.isdigit() else 1
+                if sel_idx == 0:
+                    break
+                if 1 <= sel_idx <= len(cands_to_show):
+                    chosen = cands_to_show[sel_idx - 1]
+                    c_decision = (chosen.get("human_decision") or "PENDING").upper()
+                    c_id = chosen.get("candidate_id", f"cand_{sel_idx}")
+
+                    # Contamination Prevention Check 1: Reject explicit REJECT and UNCERTAIN
+                    if c_decision in ("REJECT", "UNCERTAIN"):
+                        print(f"\n[CONTAMINATION PREVENTED] Candidate '{c_id}' has review status '{c_decision}'.")
+                        print("Rejected or uncertain candidates cannot enter the training dataset.")
+                        continue
+
+                    # Contamination Prevention Check 2: Require review for PENDING candidates
+                    if c_decision == "PENDING":
+                        print(f"\n[REVIEW REQUIRED] Candidate '{c_id}' is unreviewed (PENDING).")
+                        print("Proposed classes must never automatically become ground-truth training samples.")
+                        confirm_review = input(f"Do you want to human-review and verify this candidate now? [y/N]: ").strip().lower()
+                        if confirm_review != "y":
+                            print(f"Candidate '{c_id}' skipped. Please run 'python review_candidates.py' first.")
+                            continue
+
+                        # Prompt reviewer to confirm or correct movement class
+                        prop_class = chosen.get("proposed_movement") or chosen.get("movement_type", "LUNGE")
+                        print(f"\nConfirm ground-truth movement class for '{c_id}' (Proposed was: {prop_class}):")
+                        for m_idx, m_val in MOVEMENT_TYPES.items():
+                            print(f"  [{m_idx}] {m_val}")
+                        print("  [R] REJECT candidate (not a valid movement)")
+                        rev_choice = input(f"Select movement number (or Enter for proposed '{prop_class}'): ").strip()
+
+                        if rev_choice.upper() == "R":
+                            chosen["human_decision"] = "REJECT"
+                            chosen["status"] = "REJECTED"
+                            print(f"Candidate '{c_id}' marked as REJECTED. Cannot enter dataset.")
+                            # Update candidate file if possible
+                            try:
+                                with open(cand_path, "w", newline="") as fw:
+                                    w = csv.DictWriter(fw, fieldnames=list(reader[0].keys()))
+                                    w.writeheader()
+                                    w.writerows(reader)
+                            except Exception:
+                                pass
+                            continue
+
+                        confirmed_class = MOVEMENT_TYPES.get(rev_choice, prop_class)
+                        chosen["human_decision"] = "ACCEPT"
+                        chosen["reviewed_movement"] = confirmed_class
+                        chosen["status"] = "ACCEPTED"
+                        # Persist confirmed decision back to candidates CSV
+                        try:
+                            with open(cand_path, "w", newline="") as fw:
+                                w = csv.DictWriter(fw, fieldnames=list(reader[0].keys()))
+                                w.writeheader()
+                                w.writerows(reader)
+                            print(f"✅ Verified '{c_id}' as '{confirmed_class}' and saved to {cand_path.name}.")
+                        except Exception:
+                            pass
+
+                    start_time = float(chosen["start_time"])
+                    end_time = float(chosen["end_time"])
+                    suggested_movement = chosen.get("reviewed_movement") or chosen.get("proposed_movement") or chosen.get("movement_type")
+                    print(f"\nLoaded Candidate '{c_id}': {suggested_movement} ({start_time}s to {end_time}s)")
+                    break
+                else:
+                    print("Invalid selection. Try again.")
+
+    # Prompt for start/end/fps if not specified in CLI or candidates
+    start_time = start_time if start_time is not None else prompt_float("Enter start time in seconds: ", 0.0)
+    end_time = end_time if end_time is not None else prompt_float("Enter end time in seconds: ", start_time)
     sample_fps = args.sample_fps if args.sample_fps is not None else prompt_float("Enter sample FPS: ", 0.1)
 
     if end_time <= start_time:
@@ -224,6 +327,7 @@ def main() -> None:
             annotated_frame = frame.copy()
             if result.pose_landmarks:
                 landmarks = result.pose_landmarks[0]
+                world_landmarks = result.pose_world_landmarks[0] if result.pose_world_landmarks else None
                 features = extract_pose_features(landmarks, PoseLandmark)
                 draw_skeleton_overlay(annotated_frame, landmarks, PoseLandmark)
                 
@@ -239,10 +343,21 @@ def main() -> None:
                             "visibility": float(lm.visibility) if hasattr(lm, "visibility") else 0.0,
                             "presence": float(lm.presence) if hasattr(lm, "presence") else 0.0
                         })
+                    frame_world_lms = []
+                    if world_landmarks:
+                        for wlm in world_landmarks:
+                            frame_world_lms.append({
+                                "x": float(wlm.x),
+                                "y": float(wlm.y),
+                                "z": float(wlm.z),
+                                "visibility": float(wlm.visibility) if hasattr(wlm, "visibility") else 0.0,
+                                "presence": float(wlm.presence) if hasattr(wlm, "presence") else 0.0
+                            })
                     raw_landmarks_all_frames.append({
                         "frame_index": frame_idx,
                         "timestamp_sec": round(timestamp_sec, 3),
-                        "landmarks": frame_lms
+                        "landmarks": frame_lms,
+                        "world_landmarks": frame_world_lms
                     })
             
             playback_frames.append(annotated_frame)
@@ -307,7 +422,7 @@ def main() -> None:
     print(f"  Trunk lean tilt: [{features_summary['trunk_angle_min']} - {features_summary['trunk_angle_max']}]")
     print("="*40)
 
-    movement_type = prompt_choice("Select Movement Type:", MOVEMENT_TYPES)
+    movement_type = prompt_choice("Select Movement Type:", MOVEMENT_TYPES, default_choice=suggested_movement)
     risk_label = prompt_choice("Select Injury Risk Label:", RISK_LABELS)
 
     # Save raw landmarks to JSON
@@ -347,8 +462,31 @@ def main() -> None:
         "risk_label": risk_label
     }
 
-    # Write to CSV
+    # Prevent dataset contamination: Check for duplicate / heavily overlapping sequences
     file_exists = output_csv.exists()
+    if file_exists and output_csv.stat().st_size > 0:
+        with open(output_csv, "r", newline="") as existing_file:
+            existing_rows = list(csv.DictReader(existing_file))
+            for erow in existing_rows:
+                if erow.get("video_id") == video_path.name:
+                    try:
+                        ef_start = int(erow.get("frame_start", 0))
+                        ef_end = int(erow.get("frame_end", 0))
+                        overlap_frames = min(frame_end, ef_end) - max(frame_start, ef_start)
+                        if overlap_frames > int(source_fps * 0.4):
+                            overlap_sec = overlap_frames / source_fps
+                            print(f"\n⚠️  [DUPLICATE / OVERLAP WARNING] Sequence overlaps by {overlap_sec:.2f}s with existing sample:")
+                            print(f"   Existing: '{erow['sequence_id']}' ({erow.get('movement_type')}, frames {ef_start}-{ef_end})")
+                            confirm_dup = input("Add overlapping sample to dataset anyway? [y/N]: ").strip().lower()
+                            if confirm_dup != "y":
+                                print("[CONTAMINATION PREVENTED] Cancelled adding overlapping sequence to dataset.")
+                                if temp_clip_path.exists():
+                                    temp_clip_path.unlink()
+                                return
+                    except (ValueError, TypeError):
+                        pass
+
+    # Write to CSV
     mode = "a" if args.append and file_exists else "w"
     
     output_csv.parent.mkdir(parents=True, exist_ok=True)

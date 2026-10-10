@@ -198,6 +198,7 @@ def analyze_video(
                 if results.pose_landmarks:
                     pose_detected = True
                     landmarks = results.pose_landmarks[0]
+                    world_landmarks = results.pose_world_landmarks[0] if results.pose_world_landmarks else None
                     
                     # Extract 2D features
                     features = extract_pose_features(landmarks, PoseLandmark)
@@ -218,10 +219,21 @@ def analyze_video(
                                 "visibility": float(lm.visibility) if hasattr(lm, "visibility") else 0.0,
                                 "presence": float(lm.presence) if hasattr(lm, "presence") else 0.0
                             })
+                        frame_world_lms = []
+                        if world_landmarks:
+                            for wlm in world_landmarks:
+                                frame_world_lms.append({
+                                    "x": float(wlm.x),
+                                    "y": float(wlm.y),
+                                    "z": float(wlm.z),
+                                    "visibility": float(wlm.visibility) if hasattr(wlm, "visibility") else 0.0,
+                                    "presence": float(wlm.presence) if hasattr(wlm, "presence") else 0.0
+                                })
                         raw_landmarks_all_frames.append({
                             "frame_index": frame_idx,
                             "timestamp_sec": round(timestamp_sec, 3),
-                            "landmarks": frame_landmarks
+                            "landmarks": frame_landmarks,
+                            "world_landmarks": frame_world_lms
                         })
 
                 # Write annotated frame
