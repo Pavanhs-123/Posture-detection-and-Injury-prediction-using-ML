@@ -8,11 +8,20 @@ from review_candidates import (
     load_candidates_from_csv,
     save_candidates_to_csv,
     calculate_review_summary,
+    find_overlapping_candidates,
     VALID_MOVEMENT_CLASSES,
+    TARGET_MOVEMENT_CLASSES,
+    RETIRED_CLASSES,
+)
+from dataset_builder import (
+    VALID_TARGET_CLASSES as DS_TARGET_CLASSES,
+    RETIRED_CLASSES as DS_RETIRED_CLASSES,
+    MOVEMENT_TYPES as DS_MOVEMENT_TYPES,
 )
 from src.detection.candidate_detector import (
     MovementCandidate,
     CANDIDATE_CSV_FIELDS,
+    TARGET_MOVEMENT_CLASSES as DETECTOR_TARGET_CLASSES,
 )
 
 
@@ -172,6 +181,43 @@ class TestCandidateReviewWorkflow(unittest.TestCase):
         no_ov_start, no_ov_end = 220, 280
         no_ov_frames = min(no_ov_end, ex_end) - max(no_ov_start, ex_start)
         self.assertLessEqual(no_ov_frames, 0)
+
+    def test_target_movement_classes_exactly_three(self):
+        """Verifies candidate review and detector only allow the 3 target classes."""
+        expected = ["LUNGE", "SMASH_LANDING", "CHANGE_OF_DIRECTION"]
+        self.assertEqual(TARGET_MOVEMENT_CLASSES, expected)
+        self.assertEqual(DETECTOR_TARGET_CLASSES, expected)
+        self.assertEqual(set(expected), DS_TARGET_CLASSES)
+        self.assertNotIn("SCISSOR_JUMP", TARGET_MOVEMENT_CLASSES)
+        self.assertNotIn("FOOTWORK_SPLIT_STEP", TARGET_MOVEMENT_CLASSES)
+        self.assertIn("SCISSOR_JUMP", RETIRED_CLASSES)
+        self.assertIn("FOOTWORK_SPLIT_STEP", RETIRED_CLASSES)
+
+    def test_retired_classes_cannot_enter_dataset(self):
+        """Retired movement classes must not be present in dataset builder movement types or valid targets."""
+        for num_key, name in DS_MOVEMENT_TYPES.items():
+            self.assertIn(name, DS_TARGET_CLASSES)
+            self.assertNotIn(name, DS_RETIRED_CLASSES)
+        self.assertNotIn("SCISSOR_JUMP", DS_TARGET_CLASSES)
+        self.assertNotIn("FOOTWORK_SPLIT_STEP", DS_TARGET_CLASSES)
+        self.assertIn("SCISSOR_JUMP", DS_RETIRED_CLASSES)
+        self.assertIn("FOOTWORK_SPLIT_STEP", DS_RETIRED_CLASSES)
+
+    def test_find_overlapping_candidates(self):
+        """Tests that candidate review identifies temporal overlaps within the same video."""
+        cands = [
+            {"candidate_id": "c1", "video_id": "vid.mp4", "start_time": "1.0", "end_time": "2.5"},
+            {"candidate_id": "c2", "video_id": "vid.mp4", "start_time": "2.0", "end_time": "3.5"}, # overlaps c1 by 0.5s
+            {"candidate_id": "c3", "video_id": "vid.mp4", "start_time": "5.0", "end_time": "6.0"}, # no overlap
+            {"candidate_id": "c4", "video_id": "other.mp4", "start_time": "1.0", "end_time": "2.5"}, # different video
+        ]
+        ov_for_c1 = find_overlapping_candidates(cands, 0)
+        self.assertEqual(len(ov_for_c1), 1)
+        self.assertEqual(ov_for_c1[0][0]["candidate_id"], "c2")
+        self.assertAlmostEqual(ov_for_c1[0][1], 0.5)
+
+        ov_for_c3 = find_overlapping_candidates(cands, 2)
+        self.assertEqual(len(ov_for_c3), 0)
 
 
 if __name__ == "__main__":

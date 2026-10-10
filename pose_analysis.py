@@ -52,10 +52,26 @@ def ensure_model_file() -> None:
         model_file.write(response.read())
 
 
-def calculate_angle(a: list[float], b: list[float], c: list[float]) -> float:
+def calculate_angle(
+    a: list[float],
+    b: list[float],
+    c: list[float],
+    image_dimensions: tuple[int, int] | None = None,
+) -> float:
+    if a is None or b is None or c is None:
+        return 0.0
     a_vec = np.array(a[:2], dtype=float)
     b_vec = np.array(b[:2], dtype=float)
     c_vec = np.array(c[:2], dtype=float)
+
+    # Correct for non-square pixel aspect ratio if image dimensions (width, height) are provided
+    if image_dimensions is not None and len(image_dimensions) == 2:
+        width, height = image_dimensions
+        if width > 0 and height > 0:
+            scale = np.array([float(width), float(height)], dtype=float)
+            a_vec = a_vec * scale
+            b_vec = b_vec * scale
+            c_vec = c_vec * scale
 
     radians = np.arctan2(c_vec[1] - b_vec[1], c_vec[0] - b_vec[0]) - np.arctan2(
         a_vec[1] - b_vec[1], a_vec[0] - b_vec[0]
@@ -132,16 +148,21 @@ def get_point_3d(landmarks: list, idx, min_confidence: float | None = None) -> l
     return [float(point.x), float(point.y), float(point.z)]
 
 
-def get_knee_angle(landmarks: list, pose_landmark, min_confidence: float | None = None) -> tuple[float | None, float | None, float | None]:
+def get_knee_angle(
+    landmarks: list,
+    pose_landmark,
+    min_confidence: float | None = None,
+    image_dimensions: tuple[int, int] | None = None,
+) -> tuple[float | None, float | None, float | None]:
     hip_l = get_point(landmarks, pose_landmark.LEFT_HIP, min_confidence)
     knee_l = get_point(landmarks, pose_landmark.LEFT_KNEE, min_confidence)
     ankle_l = get_point(landmarks, pose_landmark.LEFT_ANKLE, min_confidence)
-    left = calculate_angle(hip_l, knee_l, ankle_l) if hip_l and knee_l and ankle_l else None
+    left = calculate_angle(hip_l, knee_l, ankle_l, image_dimensions) if hip_l and knee_l and ankle_l else None
 
     hip_r = get_point(landmarks, pose_landmark.RIGHT_HIP, min_confidence)
     knee_r = get_point(landmarks, pose_landmark.RIGHT_KNEE, min_confidence)
     ankle_r = get_point(landmarks, pose_landmark.RIGHT_ANKLE, min_confidence)
-    right = calculate_angle(hip_r, knee_r, ankle_r) if hip_r and knee_r and ankle_r else None
+    right = calculate_angle(hip_r, knee_r, ankle_r, image_dimensions) if hip_r and knee_r and ankle_r else None
 
     return left, right, average_angles([left, right])
 
@@ -160,16 +181,21 @@ def get_knee_angle_3d(landmarks_3d: list, pose_landmark, min_confidence: float |
     return left, right, average_angles([left, right])
 
 
-def get_elbow_angle(landmarks: list, pose_landmark, min_confidence: float | None = None) -> tuple[float | None, float | None, float | None]:
+def get_elbow_angle(
+    landmarks: list,
+    pose_landmark,
+    min_confidence: float | None = None,
+    image_dimensions: tuple[int, int] | None = None,
+) -> tuple[float | None, float | None, float | None]:
     sh_l = get_point(landmarks, pose_landmark.LEFT_SHOULDER, min_confidence)
     el_l = get_point(landmarks, pose_landmark.LEFT_ELBOW, min_confidence)
     wr_l = get_point(landmarks, pose_landmark.LEFT_WRIST, min_confidence)
-    left = calculate_angle(sh_l, el_l, wr_l) if sh_l and el_l and wr_l else None
+    left = calculate_angle(sh_l, el_l, wr_l, image_dimensions) if sh_l and el_l and wr_l else None
 
     sh_r = get_point(landmarks, pose_landmark.RIGHT_SHOULDER, min_confidence)
     el_r = get_point(landmarks, pose_landmark.RIGHT_ELBOW, min_confidence)
     wr_r = get_point(landmarks, pose_landmark.RIGHT_WRIST, min_confidence)
-    right = calculate_angle(sh_r, el_r, wr_r) if sh_r and el_r and wr_r else None
+    right = calculate_angle(sh_r, el_r, wr_r, image_dimensions) if sh_r and el_r and wr_r else None
 
     return left, right, average_angles([left, right])
 
@@ -188,7 +214,12 @@ def get_elbow_angle_3d(landmarks_3d: list, pose_landmark, min_confidence: float 
     return left, right, average_angles([left, right])
 
 
-def get_torso_lean(landmarks: list, pose_landmark, min_confidence: float | None = None) -> float | None:
+def get_torso_lean(
+    landmarks: list,
+    pose_landmark,
+    min_confidence: float | None = None,
+    image_dimensions: tuple[int, int] | None = None,
+) -> float | None:
     ls = get_point(landmarks, pose_landmark.LEFT_SHOULDER, min_confidence)
     rs = get_point(landmarks, pose_landmark.RIGHT_SHOULDER, min_confidence)
     lh = get_point(landmarks, pose_landmark.LEFT_HIP, min_confidence)
@@ -197,10 +228,20 @@ def get_torso_lean(landmarks: list, pose_landmark, min_confidence: float | None 
     if not (ls and rs and lh and rh):
         return None
 
-    left_shoulder = np.array(ls)
-    right_shoulder = np.array(rs)
-    left_hip = np.array(lh)
-    right_hip = np.array(rh)
+    left_shoulder = np.array(ls, dtype=float)
+    right_shoulder = np.array(rs, dtype=float)
+    left_hip = np.array(lh, dtype=float)
+    right_hip = np.array(rh, dtype=float)
+
+    # Scale to pixels if dimensions provided
+    if image_dimensions is not None and len(image_dimensions) == 2:
+        width, height = image_dimensions
+        if width > 0 and height > 0:
+            scale = np.array([float(width), float(height)], dtype=float)
+            left_shoulder = left_shoulder * scale
+            right_shoulder = right_shoulder * scale
+            left_hip = left_hip * scale
+            right_hip = right_hip * scale
 
     shoulder_center = (left_shoulder + right_shoulder) / 2.0
     hip_center = (left_hip + right_hip) / 2.0
@@ -247,9 +288,13 @@ def get_torso_lean_3d(landmarks_3d: list, pose_landmark, min_confidence: float |
     return float(lean)
 
 
-def extract_pose_features(landmarks: list, pose_landmark) -> PoseFeatures:
-    left_knee, right_knee, knee_angle = get_knee_angle(landmarks, pose_landmark)
-    left_elbow, right_elbow, elbow_angle = get_elbow_angle(landmarks, pose_landmark)
+def extract_pose_features(
+    landmarks: list,
+    pose_landmark,
+    image_dimensions: tuple[int, int] | None = None,
+) -> PoseFeatures:
+    left_knee, right_knee, knee_angle = get_knee_angle(landmarks, pose_landmark, image_dimensions=image_dimensions)
+    left_elbow, right_elbow, elbow_angle = get_elbow_angle(landmarks, pose_landmark, image_dimensions=image_dimensions)
 
     return PoseFeatures(
         left_knee_angle=left_knee,
@@ -258,7 +303,7 @@ def extract_pose_features(landmarks: list, pose_landmark) -> PoseFeatures:
         left_elbow_angle=left_elbow,
         right_elbow_angle=right_elbow,
         elbow_angle=elbow_angle,
-        torso_lean=get_torso_lean(landmarks, pose_landmark),
+        torso_lean=get_torso_lean(landmarks, pose_landmark, image_dimensions=image_dimensions),
     )
 
 

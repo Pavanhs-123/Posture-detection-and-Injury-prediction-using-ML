@@ -113,7 +113,7 @@ else:
 # Main Page Header
 st.title("🏸 AI-Based Badminton Posture Detection & Injury-Risk Assessment")
 st.markdown(
-    "Upload a video of a badminton movement sequence (e.g., Smash Landing, Lunge, Split Step), "
+    "Upload a video of a badminton movement sequence (e.g., Lunge, Smash Landing, Change of Direction), "
     "configure the start/end timing, and execute biomechanical pose analysis."
 )
 
@@ -125,14 +125,19 @@ with col_upload:
     uploaded_file = st.file_uploader(
         "Choose video file...", 
         type=["mp4", "avi", "mov"],
-        help="Make sure the player's full body is visible and shot from a side angle."
+        help="Data Collection Protocol: Prefer fixed side-view (~90°) footage on a tripod with the full body and both feet visible."
     )
 
 with col_params:
     st.subheader("⚙️ Step 2: Configuration")
     movement_type = st.selectbox(
         "Select Movement Type",
-        ["LUNGE", "SMASH_LANDING", "SCISSOR_JUMP", "CHANGE_OF_DIRECTION", "FOOTWORK_SPLIT_STEP"]
+        ["LUNGE", "SMASH_LANDING", "CHANGE_OF_DIRECTION"]
+    )
+    camera_viewpoint = st.selectbox(
+        "Camera Viewpoint (Metadata)",
+        ["side_90deg (Preferred)", "diagonal_45deg", "front_view", "rear_view", "broadcast_free"],
+        help="Note: Monocular 3D world landmarks reduce but do NOT eliminate perspective and foreshortening effects from non-perpendicular camera angles."
     )
     
     # Clip timing options

@@ -15,6 +15,7 @@ FIELDNAMES = [
     "sequence_id",
     "video_id",
     "movement_type",
+    "camera_viewpoint",
     "frame_start",
     "frame_end",
     "duration",
@@ -34,9 +35,18 @@ FIELDNAMES = [
 MOVEMENT_TYPES = {
     "1": "LUNGE",
     "2": "SMASH_LANDING",
-    "3": "SCISSOR_JUMP",
-    "4": "CHANGE_OF_DIRECTION",
-    "5": "FOOTWORK_SPLIT_STEP"
+    "3": "CHANGE_OF_DIRECTION",
+}
+
+VALID_TARGET_CLASSES = {"LUNGE", "SMASH_LANDING", "CHANGE_OF_DIRECTION"}
+RETIRED_CLASSES = {"SCISSOR_JUMP", "FOOTWORK_SPLIT_STEP"}
+
+CAMERA_VIEWPOINTS = {
+    "1": "side_90deg",
+    "2": "diagonal_45deg",
+    "3": "front_view",
+    "4": "rear_view",
+    "5": "broadcast_free",
 }
 
 RISK_LABELS = {
@@ -52,6 +62,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-time", type=float, help="Sequence start time in seconds")
     parser.add_argument("--end-time", type=float, help="Sequence end time in seconds")
     parser.add_argument("--sample-fps", type=float, default=10.0, help="Frames per second to extract landmarks")
+    parser.add_argument(
+        "--camera-viewpoint",
+        type=str,
+        default="side_90deg",
+        choices=["side_90deg", "diagonal_45deg", "front_view", "rear_view", "broadcast_free"],
+        help="Camera viewpoint metadata (default: side_90deg - preferred: fixed side-view at ~90 degrees with full body and feet visible)",
+    )
     parser.add_argument("--candidates-csv", type=str, help="Optional candidates CSV from detect_candidates.py to select pre-detected movement intervals")
     parser.add_argument("--append", action="store_true", default=True, help="Append to existing dataset CSV")
     return parser.parse_args()
@@ -73,7 +90,6 @@ def prompt_choice(prompt_text: str, options: dict, default_choice: str | None = 
     for k, v in options.items():
         tag = " (Suggested)" if v == default_choice else ""
         print(f"  [{k}] {v}{tag}")
-    print("  [6] Enter custom string")
     
     while True:
         prompt_label = f"Select (Enter for {default_choice}): " if default_choice else "Select: "
@@ -82,10 +98,6 @@ def prompt_choice(prompt_text: str, options: dict, default_choice: str | None = 
             return default_choice
         if choice in options:
             return options[choice]
-        elif choice == "6":
-            custom = input("Enter custom string: ").strip().upper()
-            if custom:
-                return custom
         print("Invalid choice. Please select one of the numbers.")
 
 def draw_skeleton_overlay(frame, landmarks, pose_landmark):
@@ -168,6 +180,8 @@ def main() -> None:
                     chosen = cands_to_show[sel_idx - 1]
                     c_decision = (chosen.get("human_decision") or "PENDING").upper()
                     c_id = chosen.get("candidate_id", f"cand_{sel_idx}")
+                    prop_class = chosen.get("proposed_movement") or chosen.get("movement_type", "LUNGE")
+                    rev_class = chosen.get("reviewed_movement", "")
 
                     # Contamination Prevention Check 1: Reject explicit REJECT and UNCERTAIN
                     if c_decision in ("REJECT", "UNCERTAIN"):
@@ -175,7 +189,15 @@ def main() -> None:
                         print("Rejected or uncertain candidates cannot enter the training dataset.")
                         continue
 
-                    # Contamination Prevention Check 2: Require review for PENDING candidates
+                    # Contamination Prevention Check 2: Block retired classes from entering dataset
+                    if rev_class in RETIRED_CLASSES or (c_decision == "ACCEPT" and prop_class in RETIRED_CLASSES and rev_class not in VALID_TARGET_CLASSES):
+                        print(f"\n[RETIRED CLASS BLOCKED] Candidate '{c_id}' is associated with retired class '{rev_class or prop_class}'.")
+                        print("SCISSOR_JUMP and FOOTWORK_SPLIT_STEP are removed and cannot enter the dataset.")
+                        print("Please reclassify to LUNGE, SMASH_LANDING, or CHANGE_OF_DIRECTION, or mark REJECT / UNCERTAIN.")
+                        # Force reclassification
+                        c_decision = "PENDING"
+
+                    # Contamination Prevention Check 3: Require review for PENDING candidates
                     if c_decision == "PENDING":
                         print(f"\n[REVIEW REQUIRED] Candidate '{c_id}' is unreviewed (PENDING).")
                         print("Proposed classes must never automatically become ground-truth training samples.")
@@ -185,18 +207,38 @@ def main() -> None:
                             continue
 
                         # Prompt reviewer to confirm or correct movement class
-                        prop_class = chosen.get("proposed_movement") or chosen.get("movement_type", "LUNGE")
                         print(f"\nConfirm ground-truth movement class for '{c_id}' (Proposed was: {prop_class}):")
                         for m_idx, m_val in MOVEMENT_TYPES.items():
                             print(f"  [{m_idx}] {m_val}")
-                        print("  [R] REJECT candidate (not a valid movement)")
-                        rev_choice = input(f"Select movement number (or Enter for proposed '{prop_class}'): ").strip()
+                        print("  [R] REJECT candidate (not a valid target movement)")
+                        print("  [U] Mark UNCERTAIN (cannot verify target movement)")
+
+                        if prop_class in RETIRED_CLASSES:
+                            print(f"  Note: Proposed '{prop_class}' is a retired class and cannot be selected as default.")
+                            prompt_hint = "Select movement number [1-3], [R]eject, or [U]ncertain: "
+                        else:
+                            prompt_hint = f"Select movement number (or Enter for proposed '{prop_class}'): "
+
+                        rev_choice = input(prompt_hint).strip()
 
                         if rev_choice.upper() == "R":
                             chosen["human_decision"] = "REJECT"
+                            chosen["reviewed_movement"] = "NO_EVENT"
                             chosen["status"] = "REJECTED"
                             print(f"Candidate '{c_id}' marked as REJECTED. Cannot enter dataset.")
-                            # Update candidate file if possible
+                            try:
+                                with open(cand_path, "w", newline="") as fw:
+                                    w = csv.DictWriter(fw, fieldnames=list(reader[0].keys()))
+                                    w.writeheader()
+                                    w.writerows(reader)
+                            except Exception:
+                                pass
+                            continue
+                        elif rev_choice.upper() == "U":
+                            chosen["human_decision"] = "UNCERTAIN"
+                            chosen["reviewed_movement"] = "UNCERTAIN"
+                            chosen["status"] = "UNCERTAIN"
+                            print(f"Candidate '{c_id}' marked as UNCERTAIN. Cannot enter dataset.")
                             try:
                                 with open(cand_path, "w", newline="") as fw:
                                     w = csv.DictWriter(fw, fieldnames=list(reader[0].keys()))
@@ -206,7 +248,14 @@ def main() -> None:
                                 pass
                             continue
 
-                        confirmed_class = MOVEMENT_TYPES.get(rev_choice, prop_class)
+                        if rev_choice in MOVEMENT_TYPES:
+                            confirmed_class = MOVEMENT_TYPES[rev_choice]
+                        elif not rev_choice and prop_class in VALID_TARGET_CLASSES:
+                            confirmed_class = prop_class
+                        else:
+                            print(f"Invalid selection or retired class. Cannot proceed without a valid target class ({', '.join(VALID_TARGET_CLASSES)}).")
+                            continue
+
                         chosen["human_decision"] = "ACCEPT"
                         chosen["reviewed_movement"] = confirmed_class
                         chosen["status"] = "ACCEPTED"
@@ -222,8 +271,12 @@ def main() -> None:
 
                     start_time = float(chosen["start_time"])
                     end_time = float(chosen["end_time"])
-                    suggested_movement = chosen.get("reviewed_movement") or chosen.get("proposed_movement") or chosen.get("movement_type")
-                    print(f"\nLoaded Candidate '{c_id}': {suggested_movement} ({start_time}s to {end_time}s)")
+                    cand_mov = chosen.get("reviewed_movement") or chosen.get("proposed_movement") or chosen.get("movement_type")
+                    if cand_mov in VALID_TARGET_CLASSES:
+                        suggested_movement = cand_mov
+                    else:
+                        suggested_movement = None
+                    print(f"\nLoaded Candidate '{c_id}': {suggested_movement or 'UNCERTAIN'} ({start_time}s to {end_time}s)")
                     break
                 else:
                     print("Invalid selection. Try again.")
@@ -328,7 +381,9 @@ def main() -> None:
             if result.pose_landmarks:
                 landmarks = result.pose_landmarks[0]
                 world_landmarks = result.pose_world_landmarks[0] if result.pose_world_landmarks else None
-                features = extract_pose_features(landmarks, PoseLandmark)
+                features = extract_pose_features(
+                    landmarks, PoseLandmark, image_dimensions=(frame_width, frame_height)
+                )
                 draw_skeleton_overlay(annotated_frame, landmarks, PoseLandmark)
                 
                 if should_sample:
@@ -423,7 +478,12 @@ def main() -> None:
     print("="*40)
 
     movement_type = prompt_choice("Select Movement Type:", MOVEMENT_TYPES, default_choice=suggested_movement)
+    if movement_type not in VALID_TARGET_CLASSES:
+        print(f"[ERROR] '{movement_type}' is not one of the valid target classes: {', '.join(VALID_TARGET_CLASSES)}.")
+        return
+
     risk_label = prompt_choice("Select Injury Risk Label:", RISK_LABELS)
+    camera_viewpoint = args.camera_viewpoint
 
     # Save raw landmarks to JSON
     landmarks_file = landmarks_dir / f"{seq_id}.json"
@@ -431,6 +491,7 @@ def main() -> None:
         json.dump({
             "sequence_id": seq_id,
             "video_name": video_path.name,
+            "camera_viewpoint": camera_viewpoint,
             "start_time": start_sec,
             "end_time": end_sec,
             "frames": raw_landmarks_all_frames
@@ -446,6 +507,7 @@ def main() -> None:
         "sequence_id": seq_id,
         "video_id": video_path.name,
         "movement_type": movement_type,
+        "camera_viewpoint": camera_viewpoint,
         "frame_start": frame_start,
         "frame_end": frame_end,
         "duration": round(duration, 3),

@@ -200,8 +200,10 @@ def analyze_video(
                     landmarks = results.pose_landmarks[0]
                     world_landmarks = results.pose_world_landmarks[0] if results.pose_world_landmarks else None
                     
-                    # Extract 2D features
-                    features = extract_pose_features(landmarks, PoseLandmark)
+                    # Extract 2D features with image dimensions to correct coordinate aspect ratio
+                    features = extract_pose_features(
+                        landmarks, PoseLandmark, image_dimensions=(frame_width, frame_height)
+                    )
                     
                     # Draw overlay
                     draw_skeleton_overlay(frame, landmarks, PoseLandmark)

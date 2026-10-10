@@ -12,3 +12,16 @@ data/landmarks/
 data/videos/
 data/comparison_2d_3d.csv
 data/dataset.csv
+data/candidates.csv
+data/*.csv
+models/*.pkl
+
+# Video and media files
+*.mp4
+*.avi
+*.mov
+
+# Environment and IDE
+.env
+.vscode/
+.idea/

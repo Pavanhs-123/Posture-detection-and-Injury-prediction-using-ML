@@ -53,8 +53,20 @@ class InjuryRiskModel:
         x = self._prepare_features(features)
         if hasattr(self.model, "predict_proba"):
             probs = self.model.predict_proba(x)[0]
-            classes = self.model.classes_ if hasattr(self.model, "classes_") else self.classes_
-            return {str(c).upper(): float(p) for c, p in zip(classes, probs)}
+            if hasattr(self.model, "classes_"):
+                model_classes = [str(c).upper() for c in self.model.classes_]
+            elif hasattr(self.model, "named_steps") and hasattr(self.model.named_steps.get("classifier", None), "classes_"):
+                model_classes = [str(c).upper() for c in self.model.named_steps["classifier"].classes_]
+            else:
+                model_classes = self.classes_
+
+            result = {c: 0.0 for c in self.classes_}
+            for c, p in zip(model_classes, probs):
+                if c in result:
+                    result[c] = round(float(p), 4)
+                else:
+                    result[c] = round(float(p), 4)
+            return result
             
         # Default fallback if predict_proba is not available
         pred = self.predict(features)

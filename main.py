@@ -155,8 +155,9 @@ def main():
                 results = landmarker.detect_for_video(mp_image, timestamp_ms)
 
                 if results.pose_landmarks:
-                    landmarks = results.pose_landmarks[0]
-                    features = extract_pose_features(landmarks, mp.tasks.vision.PoseLandmark)
+                    features = extract_pose_features(
+                        landmarks, mp.tasks.vision.PoseLandmark, image_dimensions=(frame.shape[1], frame.shape[0])
+                    )
                     draw_pose(frame, landmarks, mp.tasks.vision.PoseLandmark)
                     annotate_frame(frame, features)
                 else:

@@ -2,13 +2,12 @@
 Automatic Badminton Movement Candidate Detector
 
 Scans video footage using MediaPipe pose tracking and temporal biomechanical heuristics
-to propose start/end timestamps and candidate categories for:
+to propose start/end timestamps and candidate categories for exactly three target classes:
 - LUNGE
 - SMASH_LANDING
-- SCISSOR_JUMP
 - CHANGE_OF_DIRECTION
-- FOOTWORK_SPLIT_STEP
 
+Ambiguous observations or conflicting signals are classified as UNCERTAIN for human review.
 This module generates candidate suggestions for human review; it does not assign
 injury-risk labels.
 """
@@ -31,6 +30,8 @@ from pose_analysis import (
     get_torso_lean,
     get_landmark_confidence,
 )
+
+TARGET_MOVEMENT_CLASSES = ["LUNGE", "SMASH_LANDING", "CHANGE_OF_DIRECTION"]
 
 
 @dataclass
@@ -91,28 +92,12 @@ class DetectorConfig:
     smash_min_duration: float = 0.5
     smash_max_duration: float = 2.2
 
-    # Scissor jump parameters
-    scissor_elevation_min: float = 0.04
-    scissor_foot_clearance_min: float = 0.025 # Must be airborne during leg switch
-    scissor_swap_displacement: float = 0.04  # Ankle x relative displacement flip
-    scissor_min_duration: float = 0.5
-    scissor_max_duration: float = 2.0
-
     # Change of direction parameters
     cod_velocity_threshold: float = 0.16  # Significant lateral approach velocity
     cod_reversal_window: float = 0.6      # Time window for direction reversal
     cod_braking_knee_max: float = 150.0   # Must have athletic braking knee bend
     cod_min_duration: float = 0.4
     cod_max_duration: float = 1.8
-
-    # Split step parameters
-    split_hop_elevation_min: float = 0.015
-    split_hop_elevation_max: float = 0.055  # Distinct from high jump
-    split_stance_expansion_min: float = 0.025
-    split_ready_knee_min: float = 120.0     # Reject deep squats/lunges
-    split_ready_knee_max: float = 160.0     # Reject straight-legged standing
-    split_min_duration: float = 0.20
-    split_max_duration: float = 0.70
 
     # Non-maximum suppression and merging
     overlap_iou_threshold: float = 0.30
@@ -406,9 +391,7 @@ class MovementCandidateDetector:
         raw_candidates: list[MovementCandidate] = []
         raw_candidates.extend(self._detect_lunges(signals, video_name))
         raw_candidates.extend(self._detect_smash_landings(signals, video_name))
-        raw_candidates.extend(self._detect_scissor_jumps(signals, video_name))
         raw_candidates.extend(self._detect_changes_of_direction(signals, video_name))
-        raw_candidates.extend(self._detect_split_steps(signals, video_name))
 
         # Merge overlapping detections and suppress duplicates
         merged = self._merge_candidates(raw_candidates)
@@ -658,68 +641,6 @@ class MovementCandidateDetector:
 
         return candidates
 
-    def _detect_scissor_jumps(self, signals: list[dict], video_name: str) -> list[MovementCandidate]:
-        candidates = []
-        n = len(signals)
-        if n < 10:
-            return []
-
-        for i in range(3, n - 8):
-            s = signals[i]
-            local_baseline = s.get("baseline_hip_y", 0.5)
-            # CRITICAL: Must be airborne! Hip elevates above local baseline
-            elevation = local_baseline - s["hip_y"] if s["hip_y"] is not None else 0.0
-            if elevation >= self.config.scissor_elevation_min:
-                pre_diffs = [
-                    (signals[k]["ankle_l_x"] - signals[k]["ankle_r_x"])
-                    for k in range(max(0, i - 5), i)
-                    if signals[k]["ankle_l_x"] is not None and signals[k]["ankle_r_x"] is not None
-                ]
-                post_diffs = [
-                    (signals[k]["ankle_l_x"] - signals[k]["ankle_r_x"])
-                    for k in range(i + 3, min(n, i + 10))
-                    if signals[k]["ankle_l_x"] is not None and signals[k]["ankle_r_x"] is not None
-                ]
-
-                if pre_diffs and post_diffs:
-                    mean_pre = np.mean(pre_diffs)
-                    mean_post = np.mean(post_diffs)
-
-                    # Aerial leg reversal condition:
-                    if (mean_pre * mean_post < 0) and abs(mean_pre - mean_post) >= self.config.scissor_swap_displacement:
-                        if abs(mean_pre) >= 0.02 and abs(mean_post) >= 0.02:
-                            start_idx = max(0, i - 4)
-                            end_idx = min(n - 1, i + 8)
-                            t_start = signals[start_idx]["timestamp"]
-                            t_end = signals[end_idx]["timestamp"]
-                            dur = t_end - t_start
-
-                            if self.config.scissor_min_duration <= dur <= self.config.scissor_max_duration:
-                                swap_mag = abs(mean_pre - mean_post)
-                                score = float(round(np.clip(swap_mag / 0.15, 0.45, 0.90), 2))
-
-                                candidates.append(
-                                    MovementCandidate(
-                                        candidate_id="",
-                                        video_id=video_name,
-                                        movement_type="SCISSOR_JUMP",
-                                        start_time=round(t_start, 2),
-                                        end_time=round(t_end, 2),
-                                        duration=round(dur, 2),
-                                        confidence_score=score,
-                                        key_metrics=json.dumps({
-                                            "ankle_swap_displacement": round(float(swap_mag), 3),
-                                            "elevation": round(float(elevation), 3),
-                                        }),
-                                        status="PROPOSED",
-                                        proposed_movement="SCISSOR_JUMP",
-                                        heuristic_score=score,
-                                        human_decision="PENDING",
-                                    )
-                                )
-
-        return candidates
-
     def _detect_changes_of_direction(self, signals: list[dict], video_name: str) -> list[MovementCandidate]:
         candidates = []
         n = len(signals)
@@ -779,79 +700,6 @@ class MovementCandidateDetector:
                                     human_decision="PENDING",
                                 )
                             )
-
-        return candidates
-
-    def _detect_split_steps(self, signals: list[dict], video_name: str) -> list[MovementCandidate]:
-        candidates = []
-        n = len(signals)
-        if n < 10:
-            return []
-
-        for i in range(2, n - 6):
-            s = signals[i]
-            local_baseline = s.get("baseline_hip_y", 0.5)
-            if s["hip_y"] is not None:
-                elevation = local_baseline - s["hip_y"]
-                # Must be a small hop, not a high jump or floor standing
-                if self.config.split_hop_elevation_min <= elevation <= self.config.split_hop_elevation_max:
-                    landing_found = False
-                    landing_idx = i
-                    for k in range(i + 1, min(n, i + 6)):
-                        k_base = signals[k].get("baseline_hip_y", local_baseline)
-                        if signals[k]["hip_y"] and signals[k]["hip_y"] >= k_base - 0.008:
-                            landing_found = True
-                            landing_idx = k
-                            break
-
-                    if landing_found:
-                        start_idx = max(0, i - 2)
-                        end_idx = min(n - 1, landing_idx + 2)
-                        t_start = signals[start_idx]["timestamp"]
-                        t_end = signals[end_idx]["timestamp"]
-                        dur = t_end - t_start
-
-                        if self.config.split_min_duration <= dur <= self.config.split_max_duration:
-                            # Stance widening upon landing
-                            pre_width = signals[start_idx]["ankle_dist"] or 0.1
-                            post_width = signals[end_idx]["ankle_dist"] or 0.1
-                            width_exp = post_width - pre_width
-
-                            # Athletic ready position knee flexion check
-                            knees = [
-                                signals[k]["min_knee"]
-                                for k in range(start_idx, end_idx)
-                                if signals[k]["min_knee"] is not None
-                            ]
-                            min_k = min(knees) if knees else 145.0
-
-                            # CRITICAL: Reject straight-legged standing (> 160 deg) and deep crouches (< 120 deg)
-                            if self.config.split_ready_knee_min <= min_k <= self.config.split_ready_knee_max:
-                                if width_exp >= self.config.split_stance_expansion_min:
-                                    dur_score = np.clip((0.7 - dur) / 0.4, 0.4, 0.90)
-                                    hop_score = np.clip(elevation / 0.04, 0.4, 0.90)
-                                    score = float(round(dur_score * 0.5 + hop_score * 0.5, 2))
-
-                                    candidates.append(
-                                        MovementCandidate(
-                                            candidate_id="",
-                                            video_id=video_name,
-                                            movement_type="FOOTWORK_SPLIT_STEP",
-                                            start_time=round(t_start, 2),
-                                            end_time=round(t_end, 2),
-                                            duration=round(dur, 2),
-                                            confidence_score=score,
-                                            key_metrics=json.dumps({
-                                                "hop_elevation": round(float(elevation), 3),
-                                                "stance_expansion": round(float(width_exp), 3),
-                                                "ready_knee_flexion": round(float(min_k), 1),
-                                            }),
-                                            status="PROPOSED",
-                                            proposed_movement="FOOTWORK_SPLIT_STEP",
-                                            heuristic_score=score,
-                                            human_decision="PENDING",
-                                        )
-                                    )
 
         return candidates
 

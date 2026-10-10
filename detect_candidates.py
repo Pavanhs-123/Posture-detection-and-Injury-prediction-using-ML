@@ -5,9 +5,7 @@ CLI Tool for Automatic Badminton Movement Candidate Detection
 Scans a badminton video and proposes movement candidate segments for:
 - LUNGE
 - SMASH_LANDING
-- SCISSOR_JUMP
 - CHANGE_OF_DIRECTION
-- FOOTWORK_SPLIT_STEP
 
 Saves proposed candidates to CSV for human review and optionally exports preview clips.
 """

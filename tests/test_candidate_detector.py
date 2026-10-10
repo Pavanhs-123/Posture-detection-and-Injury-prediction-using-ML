@@ -85,7 +85,8 @@ class TestCandidateDetector(unittest.TestCase):
         smash = smashes[0]
         self.assertGreater(smash.confidence_score, 0.5)
 
-    def test_scissor_jump_detection(self):
+    def test_scissor_movement_not_detected_as_target_class(self):
+        """Aerial scissor leg swap must NOT generate SCISSOR_JUMP and must NOT silently map to LUNGE or SMASH_LANDING."""
         signals = self._create_base_signals(num_frames=35)
         # Pre-jump (frames 0-9): Left ankle in front of right ankle
         for i in range(0, 10):
@@ -102,9 +103,14 @@ class TestCandidateDetector(unittest.TestCase):
             signals[i]["ankle_r_x"] = 0.60  # diff = -0.20 (swapped!)
 
         candidates = self.detector.detect_candidates_from_signals(signals, "test_scissor.mp4")
-        scissors = [c for c in candidates if c.movement_type == "SCISSOR_JUMP"]
-        self.assertGreaterEqual(len(scissors), 1)
-        self.assertGreater(scissors[0].confidence_score, 0.5)
+        # Ensure SCISSOR_JUMP is never generated
+        scissors = [c for c in candidates if c.movement_type == "SCISSOR_JUMP" or c.proposed_movement == "SCISSOR_JUMP"]
+        self.assertEqual(len(scissors), 0, "SCISSOR_JUMP must not be generated as a target class")
+        # Ensure not silently mapped to LUNGE or SMASH_LANDING
+        lunges = [c for c in candidates if c.proposed_movement == "LUNGE"]
+        smashes = [c for c in candidates if c.proposed_movement == "SMASH_LANDING"]
+        self.assertEqual(len(lunges), 0, "Scissor movement must not silently map to LUNGE")
+        self.assertEqual(len(smashes), 0, "Scissor movement without smash mechanics must not map to SMASH_LANDING")
 
     def test_change_of_direction_detection(self):
         signals = self._create_base_signals(num_frames=30)
@@ -125,7 +131,8 @@ class TestCandidateDetector(unittest.TestCase):
         self.assertGreaterEqual(len(cods), 1)
         self.assertGreater(cods[0].confidence_score, 0.4)
 
-    def test_split_step_detection(self):
+    def test_split_step_movement_not_detected_as_target_class(self):
+        """Footwork split step must NOT generate FOOTWORK_SPLIT_STEP and must NOT silently map to LUNGE or SMASH_LANDING."""
         signals = self._create_base_signals(num_frames=30)
         # Quick, small hop at frames 8-12 (elevation = 0.50 - 0.47 = 0.03)
         for i in range(8, 12):
@@ -139,9 +146,12 @@ class TestCandidateDetector(unittest.TestCase):
             signals[i]["min_knee"] = 135.0   # Ready bend (not a deep lunge)
 
         candidates = self.detector.detect_candidates_from_signals(signals, "test_split.mp4")
-        splits = [c for c in candidates if c.movement_type == "FOOTWORK_SPLIT_STEP"]
-        self.assertGreaterEqual(len(splits), 1)
-        self.assertGreater(splits[0].confidence_score, 0.4)
+        # Ensure FOOTWORK_SPLIT_STEP is never generated
+        splits = [c for c in candidates if c.movement_type == "FOOTWORK_SPLIT_STEP" or c.proposed_movement == "FOOTWORK_SPLIT_STEP"]
+        self.assertEqual(len(splits), 0, "FOOTWORK_SPLIT_STEP must not be generated as a target class")
+        # Ensure not silently mapped to LUNGE or SMASH_LANDING
+        lunges = [c for c in candidates if c.proposed_movement == "LUNGE"]
+        self.assertEqual(len(lunges), 0, "Split step hop must not silently map to LUNGE")
 
     def test_nms_merging(self):
         # Two overlapping candidates of same type
@@ -294,6 +304,23 @@ class TestCandidateDetector(unittest.TestCase):
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0].proposed_movement, "UNCERTAIN")
         self.assertEqual(merged[0].status, "REVIEW_REQUIRED")
+
+    def test_removed_classes_never_generated(self):
+        """Verifies candidate detector never proposes retired classes under any conditions."""
+        signals = self._create_base_signals(num_frames=40)
+        # Combine elevated jump with swap and widen
+        for i in range(10, 18):
+            signals[i]["hip_y"] = 0.40
+            signals[i]["ankle_l_x"] = 0.35
+            signals[i]["ankle_r_x"] = 0.65
+            signals[i]["ankle_dist"] = 0.30
+
+        candidates = self.detector.detect_candidates_from_signals(signals, "test_mixed.mp4")
+        allowed = {"LUNGE", "SMASH_LANDING", "CHANGE_OF_DIRECTION", "UNCERTAIN", "NO_EVENT"}
+        for c in candidates:
+            self.assertIn(c.proposed_movement, allowed)
+            self.assertNotIn(c.proposed_movement, ["SCISSOR_JUMP", "FOOTWORK_SPLIT_STEP"])
+            self.assertNotIn(c.movement_type, ["SCISSOR_JUMP", "FOOTWORK_SPLIT_STEP"])
 
 
 if __name__ == "__main__":

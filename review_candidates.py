@@ -25,14 +25,23 @@ from src.detection.candidate_detector import (
     CANDIDATE_CSV_FIELDS,
 )
 
+TARGET_MOVEMENT_CLASSES = [
+    "LUNGE",
+    "SMASH_LANDING",
+    "CHANGE_OF_DIRECTION",
+]
+
 VALID_MOVEMENT_CLASSES = [
     "LUNGE",
     "SMASH_LANDING",
-    "SCISSOR_JUMP",
     "CHANGE_OF_DIRECTION",
-    "FOOTWORK_SPLIT_STEP",
     "NO_EVENT",
     "UNCERTAIN",
+]
+
+RETIRED_CLASSES = [
+    "SCISSOR_JUMP",
+    "FOOTWORK_SPLIT_STEP",
 ]
 
 DECISIONS = ["PENDING", "ACCEPT", "REJECT", "UNCERTAIN"]
@@ -68,13 +77,20 @@ def calculate_review_summary(candidates: List[Dict[str, str]]) -> Dict[str, int]
         "total": len(candidates),
         "pending": 0,
         "accepted": 0,
+        "accepted_target": 0,
+        "accepted_retired": 0,
         "rejected": 0,
         "uncertain": 0,
     }
     for c in candidates:
         dec = (c.get("human_decision") or "PENDING").upper()
+        rev_mov = (c.get("reviewed_movement") or "").strip().upper()
         if dec == "ACCEPT":
             summary["accepted"] += 1
+            if rev_mov in RETIRED_CLASSES:
+                summary["accepted_retired"] += 1
+            elif rev_mov in TARGET_MOVEMENT_CLASSES:
+                summary["accepted_target"] += 1
         elif dec == "REJECT":
             summary["rejected"] += 1
         elif dec == "UNCERTAIN":
@@ -84,13 +100,43 @@ def calculate_review_summary(candidates: List[Dict[str, str]]) -> Dict[str, int]
     return summary
 
 
+def find_overlapping_candidates(candidates: List[Dict[str, str]], target_idx: int) -> List[tuple[Dict[str, str], float]]:
+    """Identifies any other candidates in the same video that temporally overlap with the target candidate."""
+    target = candidates[target_idx]
+    v_target = target.get("video_id", "")
+    try:
+        t_s = float(target.get("start_time", 0.0))
+        t_e = float(target.get("end_time", 0.0))
+    except (ValueError, TypeError):
+        return []
+
+    overlaps = []
+    for i, other in enumerate(candidates):
+        if i == target_idx:
+            continue
+        if other.get("video_id") != v_target:
+            continue
+        try:
+            o_s = float(other.get("start_time", 0.0))
+            o_e = float(other.get("end_time", 0.0))
+            overlap_dur = min(t_e, o_e) - max(t_s, o_s)
+            if overlap_dur > 0.05:  # Overlap greater than 50ms
+                overlaps.append((other, round(overlap_dur, 2)))
+        except (ValueError, TypeError):
+            continue
+    return overlaps
+
+
 def print_summary_table(summary: Dict[str, int], csv_path: str) -> None:
     total = max(summary["total"], 1)
     print("\n" + "=" * 65)
     print(f"📊 CANDIDATE HUMAN-REVIEW DIAGNOSTICS: {Path(csv_path).name}")
     print("=" * 65)
     print(f"Total Candidates:   {summary['total']}")
-    print(f"  ✅ Accepted:      {summary['accepted']:<4} ({summary['accepted']/total*100:.1f}%) -> Eligible for dataset")
+    print(f"  ✅ Accepted:      {summary['accepted']:<4} ({summary['accepted']/total*100:.1f}%) -> Total approved")
+    print(f"     • Valid Target Classes ({', '.join(TARGET_MOVEMENT_CLASSES)}): {summary.get('accepted_target', 0)}")
+    if summary.get("accepted_retired", 0) > 0:
+        print(f"     ⚠️  Retired Classes (SCISSOR_JUMP/SPLIT_STEP): {summary['accepted_retired']} (Blocked from dataset!)")
     print(f"  ❌ Rejected:      {summary['rejected']:<4} ({summary['rejected']/total*100:.1f}%) -> Blocked from dataset")
     print(f"  ❓ Uncertain:     {summary['uncertain']:<4} ({summary['uncertain']/total*100:.1f}%) -> Blocked from dataset")
     print(f"  ⏳ Awaiting Review:{summary['pending']:<4} ({summary['pending']/total*100:.1f}%) -> Blocked from dataset")
@@ -192,11 +238,26 @@ def interactive_review(candidates: List[Dict[str, str]], filter_status: str, out
         print(f"  Heuristic Score: {score}  (Heuristic rule match score, NOT a probability)")
         print(f"  Key Metrics:     {metrics_formatted}")
         print(f"  Current Status:  {curr_decision} (Reviewed class: {curr_reviewed_class or 'None'})")
+
+        # Check for temporal overlaps with other candidates from the same video
+        overlaps = find_overlapping_candidates(candidates, cand_idx)
+        if overlaps:
+            print("  ⚠️  [OVERLAP ALERT] Overlaps with existing candidate(s) in same video:")
+            for other_cand, ov_dur in overlaps:
+                o_id = other_cand.get("candidate_id", "Unknown")
+                o_class = other_cand.get("reviewed_movement") or other_cand.get("proposed_movement", "N/A")
+                o_dec = other_cand.get("human_decision", "PENDING")
+                print(f"      • Overlaps by {ov_dur:.2f}s with {o_id} (Class: {o_class}, Decision: {o_dec})")
         print("-" * 70)
 
         while True:
             choice = input("Decision [A]ccept, [C]orrect, [R]eject, [U]ncertain, [S]kip, [Q]uit: ").strip().upper()
             if choice == "A":
+                if prop_class not in TARGET_MOVEMENT_CLASSES:
+                    print(f"  ❌ Cannot accept '{prop_class}'! This class is retired or invalid.")
+                    print(f"  Valid target classes are: {', '.join(TARGET_MOVEMENT_CLASSES)}.")
+                    print("  Please [C]orrect to a target class, mark [U]ncertain, or [R]eject.")
+                    continue
                 c["human_decision"] = "ACCEPT"
                 c["reviewed_movement"] = prop_class
                 c["status"] = "ACCEPTED"
