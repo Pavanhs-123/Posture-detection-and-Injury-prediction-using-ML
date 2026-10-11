@@ -1,0 +1,44 @@
+Posture Detection and Injury Dataset Project
+
+Current progress:
+- Core rule-based injury scoring has been removed.
+- Shared MediaPipe pose-feature extraction now lives in pose_analysis.py.
+- main.py is a live pose preview tool with angle overlays only.
+- dataset_builder.py now samples a clip by time range and target FPS.
+- Each sampled frame is shown beside its extracted pose features for labeling.
+- Labeled frame rows are written to pose_data.csv for future model training.
+- README.md has been updated to match the new dataset-first workflow.
+
+Workflow diagram:
+```mermaid
+flowchart TD
+    A[Start] --> B[Load video clip or webcam feed]
+    B --> C[Run MediaPipe pose landmark detection]
+    C --> D[Extract pose features]
+    D --> E[Live preview or frame labeling]
+    E --> F[Save labeled rows to pose_data.csv]
+    F --> G[Train and evaluate a supervised classifier]
+
+    B --> H[main.py live preview]
+    B --> I[dataset_builder.py labeling flow]
+    H --> D
+    I --> J[Choose start time, stop time, and sample FPS]
+    J --> K[Preview each sampled frame with pose features]
+    K --> L[Assign low, medium, high, or custom label]
+    L --> F
+```
+
+Task list:
+- [done] Removed the rule-based injury scoring engine.
+- [done] Replaced the shared pose module with feature extraction helpers.
+- [done] Rebuilt the dataset builder around clip timing and per-frame labels.
+- [done] Updated the README and progress tracker for the new workflow.
+- [in progress] Validate the labeling loop on a real badminton clip.
+- [in progress] Check the generated CSV schema and fix any edge cases.
+- [todo] Select the first supervised model for training on the labeled features.
+- [todo] Split the dataset into train, validation, and test sets.
+- [todo] Add model evaluation and inference scripts after the dataset is ready.
+
+Notes:
+- This file is the current progress tracker for the project.
+- Update the status markers as each milestone is completed.

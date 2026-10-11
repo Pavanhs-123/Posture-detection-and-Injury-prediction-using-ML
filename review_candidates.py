@@ -149,12 +149,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--candidates-csv",
+        "--input",
         type=str,
         default="data/candidates.csv",
         help="Path to candidates CSV (default: data/candidates.csv)",
     )
     parser.add_argument(
         "--output-csv",
+        "--output",
         type=str,
         help="Path to save updated review CSV (default: overwrites candidates-csv)",
     )

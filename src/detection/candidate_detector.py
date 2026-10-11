@@ -51,6 +51,7 @@ class MovementCandidate:
     human_decision: str = "PENDING"  # PENDING, ACCEPT, REJECT, UNCERTAIN, NO_EVENT
     reviewed_movement: str = ""  # Confirmed movement class upon human review
     reviewer_notes: str = ""
+    player_id: str = ""  # Optional player identity
 
     def __post_init__(self):
         if not self.proposed_movement:
@@ -104,6 +105,9 @@ class DetectorConfig:
     merge_gap_seconds: float = 0.35
     cross_type_conflict_iou: float = 0.35
 
+    # Extended categories flag (supports SCISSOR_JUMP & FOOTWORK_SPLIT_STEP)
+    include_deferred_categories: bool = False
+
 
 CANDIDATE_CSV_FIELDS = [
     "candidate_id",
@@ -117,6 +121,7 @@ CANDIDATE_CSV_FIELDS = [
     "human_decision",
     "reviewed_movement",
     "reviewer_notes",
+    "player_id",
     # Legacy compatibility fields
     "movement_type",
     "confidence_score",
@@ -392,6 +397,10 @@ class MovementCandidateDetector:
         raw_candidates.extend(self._detect_lunges(signals, video_name))
         raw_candidates.extend(self._detect_smash_landings(signals, video_name))
         raw_candidates.extend(self._detect_changes_of_direction(signals, video_name))
+
+        if getattr(self.config, "include_deferred_categories", False):
+            raw_candidates.extend(self._detect_scissor_jumps(signals, video_name))
+            raw_candidates.extend(self._detect_split_steps(signals, video_name))
 
         # Merge overlapping detections and suppress duplicates
         merged = self._merge_candidates(raw_candidates)
@@ -701,6 +710,111 @@ class MovementCandidateDetector:
                                 )
                             )
 
+        return candidates
+
+    def _detect_scissor_jumps(self, signals: list[dict], video_name: str) -> list[MovementCandidate]:
+        """Detects aerial scissor leg swap during overhead rear-court movement."""
+        candidates = []
+        n = len(signals)
+        if n < 10:
+            return []
+
+        for i in range(5, n - 8):
+            s = signals[i]
+            local_baseline = s.get("baseline_hip_y", 0.5)
+            # Must have airborne elevation
+            if s["hip_y"] is not None and (local_baseline - s["hip_y"]) >= 0.035:
+                # Check lead/trail ankle swap before vs after apex
+                pre_ankles = [
+                    (signals[k]["ankle_l_x"] - signals[k]["ankle_r_x"])
+                    for k in range(max(0, i - 6), i - 1)
+                    if signals[k].get("ankle_l_x") is not None and signals[k].get("ankle_r_x") is not None
+                ]
+                post_ankles = [
+                    (signals[k]["ankle_l_x"] - signals[k]["ankle_r_x"])
+                    for k in range(i + 2, min(n, i + 8))
+                    if signals[k].get("ankle_l_x") is not None and signals[k].get("ankle_r_x") is not None
+                ]
+
+                if pre_ankles and post_ankles:
+                    mean_pre = float(np.mean(pre_ankles))
+                    mean_post = float(np.mean(post_ankles))
+                    # Clear sign reversal indicates swapping front/back legs in midair
+                    if (mean_pre * mean_post < -0.015) and abs(mean_pre - mean_post) >= 0.15:
+                        start_idx = max(0, i - 6)
+                        end_idx = min(n - 1, i + 8)
+                        t_start = signals[start_idx]["timestamp"]
+                        t_end = signals[end_idx]["timestamp"]
+                        dur = t_end - t_start
+
+                        candidates.append(
+                            MovementCandidate(
+                                candidate_id="",
+                                video_id=video_name,
+                                movement_type="SCISSOR_JUMP",
+                                start_time=round(t_start, 2),
+                                end_time=round(t_end, 2),
+                                duration=round(dur, 2),
+                                confidence_score=0.85,
+                                key_metrics=json.dumps({
+                                    "pre_ankle_diff": round(mean_pre, 3),
+                                    "post_ankle_diff": round(mean_post, 3),
+                                    "swap_displacement": round(abs(mean_pre - mean_post), 3),
+                                }),
+                                status="PROPOSED",
+                                proposed_movement="SCISSOR_JUMP",
+                                heuristic_score=0.85,
+                                human_decision="PENDING",
+                            )
+                        )
+        return candidates
+
+    def _detect_split_steps(self, signals: list[dict], video_name: str) -> list[MovementCandidate]:
+        """Detects preparatory split-step bounce before shuttlecock anticipation."""
+        candidates = []
+        n = len(signals)
+        if n < 8:
+            return []
+
+        for i in range(2, n - 5):
+            s = signals[i]
+            # Rapid bilateral bounce: small hop with knee flexion
+            min_k = s.get("min_knee")
+            asym = s.get("knee_asym", 0.0)
+            stance = s.get("stance_ratio", 0.0)
+
+            if min_k is not None and 125.0 <= min_k <= 155.0 and asym <= 15.0 and stance >= 0.65:
+                # Pre-split was narrower
+                pre_stances = [
+                    signals[k].get("stance_ratio", 0.0)
+                    for k in range(max(0, i - 4), i)
+                ]
+                if pre_stances and stance > np.mean(pre_stances) + 0.15:
+                    start_idx = max(0, i - 3)
+                    end_idx = min(n - 1, i + 4)
+                    t_start = signals[start_idx]["timestamp"]
+                    t_end = signals[end_idx]["timestamp"]
+                    dur = t_end - t_start
+                    if 0.2 <= dur <= 0.9:
+                        candidates.append(
+                            MovementCandidate(
+                                candidate_id="",
+                                video_id=video_name,
+                                movement_type="FOOTWORK_SPLIT_STEP",
+                                start_time=round(t_start, 2),
+                                end_time=round(t_end, 2),
+                                duration=round(dur, 2),
+                                confidence_score=0.80,
+                                key_metrics=json.dumps({
+                                    "bilateral_knee_flexion": round(float(min_k), 1),
+                                    "stance_expansion": round(float(stance - np.mean(pre_stances)), 2),
+                                }),
+                                status="PROPOSED",
+                                proposed_movement="FOOTWORK_SPLIT_STEP",
+                                heuristic_score=0.80,
+                                human_decision="PENDING",
+                            )
+                        )
         return candidates
 
     def _merge_candidates(self, candidates: list[MovementCandidate]) -> list[MovementCandidate]:

@@ -1,0 +1,13 @@
+Body Part	      ID
+Left Shoulder	  11
+Right Shoulder    12
+Left Elbow	      13
+Right Elbow	      14
+Left Wrist	      15
+Right Wrist	      16
+Left Hip	      23
+Right Hip	      24
+Left Knee	      25
+Right Knee	      26
+Left Ankle	      27
+Right Ankle	      28

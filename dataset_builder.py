@@ -14,6 +14,7 @@ from pose_analysis import MODEL_PATH, ensure_model_file, extract_pose_features
 FIELDNAMES = [
     "sequence_id",
     "video_id",
+    "player_id",
     "movement_type",
     "camera_viewpoint",
     "frame_start",
@@ -70,6 +71,7 @@ def parse_args() -> argparse.Namespace:
         help="Camera viewpoint metadata (default: side_90deg - preferred: fixed side-view at ~90 degrees with full body and feet visible)",
     )
     parser.add_argument("--candidates-csv", type=str, help="Optional candidates CSV from detect_candidates.py to select pre-detected movement intervals")
+    parser.add_argument("--player-id", type=str, default="", help="Optional unique player identity to support player-grouped evaluation")
     parser.add_argument("--append", action="store_true", default=True, help="Append to existing dataset CSV")
     return parser.parse_args()
 
@@ -506,6 +508,7 @@ def main() -> None:
     row_data = {
         "sequence_id": seq_id,
         "video_id": video_path.name,
+        "player_id": getattr(args, "player_id", "") or "",
         "movement_type": movement_type,
         "camera_viewpoint": camera_viewpoint,
         "frame_start": frame_start,
