@@ -7,8 +7,6 @@ import numpy as np
 import mediapipe as mp
 
 from pose_analysis import MODEL_PATH, ensure_model_file, extract_pose_features
-from src.model.interface import InjuryRiskModel
-from src.model.integration_test_model import IntegrationTestModel
 
 def draw_skeleton_overlay(frame, landmarks, pose_landmark):
     """
@@ -69,6 +67,23 @@ def convert_to_h264(input_path: str, output_path: str) -> bool:
         print(f"ffmpeg conversion failed: {e}")
         return False
 
+
+def summarize_pose_features(pose_features_list: list) -> dict:
+    """Summarize available measurements without substituting neutral angles."""
+    measurements = {
+        "left_knee": [f.left_knee_angle for f in pose_features_list],
+        "right_knee": [f.right_knee_angle for f in pose_features_list],
+        "left_elbow": [f.left_elbow_angle for f in pose_features_list],
+        "right_elbow": [f.right_elbow_angle for f in pose_features_list],
+        "trunk_angle": [f.torso_lean for f in pose_features_list],
+    }
+    summary = {}
+    for name, values in measurements.items():
+        valid = [float(value) for value in values if value is not None and np.isfinite(value)]
+        summary[f"{name}_min"] = round(min(valid), 2) if valid else None
+        summary[f"{name}_max"] = round(max(valid), 2) if valid else None
+    return summary
+
 def analyze_video(
     video_path: str,
     start_time: float = None,
@@ -89,8 +104,9 @@ def analyze_video(
         "video_name": os.path.basename(video_path),
         "duration": 0.0,
         "features": {},
-        "risk_label": None,
+        "risk_label": "UNASSESSED",
         "risk_probabilities": {},
+        "risk_status_message": "Automated injury-risk classification is disabled under Rubric v0.3.",
         "annotated_video_path": None,
         "pose_detected": False
     }
@@ -198,9 +214,12 @@ def analyze_video(
                 if results.pose_landmarks:
                     pose_detected = True
                     landmarks = results.pose_landmarks[0]
+                    world_landmarks = results.pose_world_landmarks[0] if results.pose_world_landmarks else None
                     
-                    # Extract 2D features
-                    features = extract_pose_features(landmarks, PoseLandmark)
+                    # Extract 2D features with image dimensions to correct coordinate aspect ratio
+                    features = extract_pose_features(
+                        landmarks, PoseLandmark, image_dimensions=(frame_width, frame_height)
+                    )
                     
                     # Draw overlay
                     draw_skeleton_overlay(frame, landmarks, PoseLandmark)
@@ -218,10 +237,21 @@ def analyze_video(
                                 "visibility": float(lm.visibility) if hasattr(lm, "visibility") else 0.0,
                                 "presence": float(lm.presence) if hasattr(lm, "presence") else 0.0
                             })
+                        frame_world_lms = []
+                        if world_landmarks:
+                            for wlm in world_landmarks:
+                                frame_world_lms.append({
+                                    "x": float(wlm.x),
+                                    "y": float(wlm.y),
+                                    "z": float(wlm.z),
+                                    "visibility": float(wlm.visibility) if hasattr(wlm, "visibility") else 0.0,
+                                    "presence": float(wlm.presence) if hasattr(wlm, "presence") else 0.0
+                                })
                         raw_landmarks_all_frames.append({
                             "frame_index": frame_idx,
                             "timestamp_sec": round(timestamp_sec, 3),
-                            "landmarks": frame_landmarks
+                            "landmarks": frame_landmarks,
+                            "world_landmarks": frame_world_lms
                         })
 
                 # Write annotated frame
@@ -242,42 +272,18 @@ def analyze_video(
     result_dict["pose_detected"] = pose_detected
 
     # Aggregate features into sequence metrics
-    left_knees = [f.left_knee_angle for f in pose_features_list if f.left_knee_angle is not None]
-    right_knees = [f.right_knee_angle for f in pose_features_list if f.right_knee_angle is not None]
-    left_elbows = [f.left_elbow_angle for f in pose_features_list if f.left_elbow_angle is not None]
-    right_elbows = [f.right_elbow_angle for f in pose_features_list if f.right_elbow_angle is not None]
-    trunk_leans = [f.torso_lean for f in pose_features_list if f.torso_lean is not None]
-
-    features_summary = {
-        "left_knee_min": round(float(np.min(left_knees)), 2) if left_knees else 180.0,
-        "left_knee_max": round(float(np.max(left_knees)), 2) if left_knees else 180.0,
-        "right_knee_min": round(float(np.min(right_knees)), 2) if right_knees else 180.0,
-        "right_knee_max": round(float(np.max(right_knees)), 2) if right_knees else 180.0,
-        "left_elbow_min": round(float(np.min(left_elbows)), 2) if left_elbows else 180.0,
-        "left_elbow_max": round(float(np.max(left_elbows)), 2) if left_elbows else 180.0,
-        "right_elbow_min": round(float(np.min(right_elbows)), 2) if right_elbows else 180.0,
-        "right_elbow_max": round(float(np.max(right_elbows)), 2) if right_elbows else 180.0,
-        "trunk_angle_min": round(float(np.min(trunk_leans)), 2) if trunk_leans else 0.0,
-        "trunk_angle_max": round(float(np.max(trunk_leans)), 2) if trunk_leans else 0.0
-    }
+    features_summary = summarize_pose_features(pose_features_list)
     result_dict["features"] = features_summary
 
-    # Run Model Inference
-    injury_model = None
-    if model_path is not None and os.path.exists(model_path):
-        try:
-            injury_model = InjuryRiskModel()
-            injury_model.load(model_path)
-        except Exception as e:
-            print(f"Failed to load model from path, falling back to Demo Mode: {e}")
-            injury_model = None
-
-    # Fallback to Demo Mode (Integration Test Model)
-    if injury_model is None:
-        injury_model = IntegrationTestModel()
-
-    result_dict["risk_label"] = injury_model.predict(features_summary)
-    result_dict["risk_probabilities"] = injury_model.predict_proba(features_summary)
+    # Rubric v0.3 does not support an automated LOW/MODERATE/HIGH injury-risk label.
+    # The legacy filename may be a movement-classifier compatibility alias, so it
+    # must never be interpreted as an independently validated injury-risk model.
+    result_dict["risk_label"] = "UNASSESSED"
+    result_dict["risk_probabilities"] = {}
+    result_dict["risk_status_message"] = (
+        "Automated injury-risk classification is disabled under Rubric v0.3. "
+        "Extracted values are biomechanical observations only."
+    )
 
     # Save landmarks to raw JSON file under data/landmarks/
     landmarks_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "data", "landmarks")

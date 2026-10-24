@@ -2,6 +2,7 @@ import os
 import pickle
 import numpy as np
 
+
 class InjuryRiskModel:
     """
     Abstraction layer for the injury-risk prediction model.
@@ -34,46 +35,42 @@ class InjuryRiskModel:
 
     def predict(self, features: dict) -> str:
         """
-        Predicts the risk label ('LOW', 'MODERATE', 'HIGH') given a dictionary of sequence features.
+        Risk classification is disabled under Rubric v0.3 pending credible validation.
         """
-        if self.model is None:
-            raise ValueError("Model is not loaded. Load a model file first or use Demo Mode.")
-            
-        x = self._prepare_features(features)
-        pred = self.model.predict(x)[0]
-        return str(pred).upper()
+        raise RuntimeError("Automated LOW/MODERATE/HIGH injury-risk classification is disabled under Rubric v0.3.")
 
     def predict_proba(self, features: dict) -> dict:
         """
-        Predicts the class probabilities for 'LOW', 'MODERATE', and 'HIGH' risk.
+        Risk probability output is disabled under Rubric v0.3 pending credible validation.
         """
-        if self.model is None:
-            raise ValueError("Model is not loaded.")
-            
-        x = self._prepare_features(features)
-        if hasattr(self.model, "predict_proba"):
-            probs = self.model.predict_proba(x)[0]
-            classes = self.model.classes_ if hasattr(self.model, "classes_") else self.classes_
-            return {str(c).upper(): float(p) for c, p in zip(classes, probs)}
-            
-        # Default fallback if predict_proba is not available
-        pred = self.predict(features)
-        return {c: 1.0 if c == pred else 0.0 for c in self.classes_}
+        raise RuntimeError("Automated LOW/MODERATE/HIGH injury-risk probabilities are disabled under Rubric v0.3.")
 
     def _prepare_features(self, features: dict) -> np.ndarray:
         """
-        Aligns feature dictionary keys into a 2D numpy array for the model.
+        Align feature values without inventing missing or invalid measurements.
         """
-        if self.feature_names:
-            vector = [features.get(name, 0.0) for name in self.feature_names]
-        else:
-            # Fallback default feature column order
-            keys = [
+        if not isinstance(features, dict):
+            raise TypeError("Model features must be provided as a dictionary.")
+
+        keys = self.feature_names or [
                 "left_knee_min", "left_knee_max",
                 "right_knee_min", "right_knee_max",
                 "left_elbow_min", "left_elbow_max",
                 "right_elbow_min", "right_elbow_max",
                 "trunk_angle_min", "trunk_angle_max"
             ]
-            vector = [features.get(k, 180.0 if "knee" in k or "elbow" in k else 0.0) for k in keys]
-        return np.array([vector])
+        missing = [name for name in keys if name not in features]
+        if missing:
+            raise ValueError(f"Missing required model feature(s): {', '.join(missing)}")
+
+        vector = []
+        for name in keys:
+            value = features[name]
+            if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, float, np.integer, np.floating)):
+                raise TypeError(f"Model feature '{name}' must be a finite numeric measurement.")
+            value = float(value)
+            if not np.isfinite(value):
+                raise ValueError(f"Model feature '{name}' must be finite; got {value!r}.")
+            vector.append(value)
+
+        return np.asarray([vector], dtype=float)

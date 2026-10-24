@@ -1,9 +1,32 @@
-venv/
+# Python environments and caches
 .venv/
+venv/
 __pycache__/
-*.pyc
-tasks.txt
-data/history.db
-data/clips/
-data/landmarks/
-.agents/
+*.py[cod]
+.pytest_cache/
+
+# User data, uploaded videos, local databases, and generated processing output
+data/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.db
+*.sqlite
+*.sqlite3
+*.jpg
+*.jpeg
+*.png
+
+# Local trained model artifacts and registries
+models/*.pkl
+models/*.joblib
+models/model_registry.json
+
+# Local secrets and Streamlit credentials
+.env
+.env.*
+.streamlit/secrets.toml
+
+# Logs
+*.log

@@ -1,136 +1,75 @@
-# AI-Based Badminton Posture Detection & Injury-Risk Assessment System
+﻿# Badminton Posture Detection: Movement Events and Biomechanical Observations
 
-This repository contains the codebase for our major project: **AI-Based Badminton Posture Detection & Injury-Risk Assessment System**.
+This repository contains a local video analysis prototype. It proposes badminton movement events, extracts 2D pose measurements, and provides an interface for human review. It is not a medical device, a clinical injury predictor, or a validated risk classifier.
 
-The application extracts biomechanical features (knee flexion, elbow extension, and torso/trunk angles) from badminton video sequences using **MediaPipe Pose Landmarker**, aggregates them into sequence-level metrics, and classifies the posture sequence as **LOW**, **MODERATE**, or **HIGH** injury-risk.
+## Active movement categories
 
----
+The active categories are `LUNGE`, `SMASH_LANDING`, and `CHANGE_OF_DIRECTION`. `SCISSOR_JUMP` and `FOOTWORK_SPLIT_STEP` remain experimental and disabled by default. Ambiguous or unsupported observations remain `UNCERTAIN` or `NO_EVENT` as appropriate.
 
-## 📸 Camera & Recording Protocol
+## Workflow
 
-To ensure consistent 2D pose estimations and avoid angle distortions, all input videos should adhere to the following setup guidelines:
+1. Upload a video in the Streamlit app or call the video pipeline.
+2. The pipeline validates the video, extracts one MediaPipe pose per frame, filters low-confidence measurements, and proposes candidate event intervals.
+3. The movement classifier reports its source and keeps detector labels separate from classifier predictions. Heuristic output is identified as heuristic and does not include fabricated probabilities.
+4. Review candidates and manifests before adding labels to training data.
+5. Use grouped evaluation by player or source video. Training stops when the available data cannot support independent partitions.
 
-1.  **Camera Placement**: Position the camera at a **side view**, approximately **90°** relative to the player's movement plane.
-2.  **Height**: Set the camera height between **1.2 to 1.5 meters** from the floor.
-3.  **Orientation**: Record in **landscape** orientation (16:9 ratio, preferably **1920×1080** resolution).
-4.  **Framing**: Ensure the player's entire body is visible from head to toe within the frame at all times.
-5.  **Camera Stability**: Keep the camera static (fixed on a tripod) and avoid tilting.
+The pipeline currently tracks one player. Use footage with one clearly visible player. Active joint measurements are image-plane 2D estimates and depend on camera view; they are not 3D clinical measurements.
 
----
+## Setup
 
-## 📁 Project Structure
+The verified environment for this code is Windows with Python 3.11.0. Linux development is intended but has not been verified in this audit.
 
-```text
-Posture-detection-and-Injury-prediction-using-ML/
-├── app/
-│   └── streamlit_app.py        # Streamlit web application dashboard
-├── data/
-│   ├── clips/                  # Labeled movement clip video files
-│   ├── landmarks/              # Raw MediaPipe joint coordinate files (JSON)
-│   └── dataset.csv             # Labeled sequence feature dataset
-├── models/
-│   └── injury_risk_model.pkl   # Serialized trained model (Scikit-learn pipeline)
-├── src/
-│   ├── inference/
-│   │   ├── __init__.py
-│   │   └── pipeline.py         # Video pipeline and pose overlays
-│   └── model/
-│       ├── __init__.py
-│       ├── integration_test_model.py # Demo Mode model
-│       └── interface.py        # Model abstraction loader
-├── tests/
-│   └── test_pipeline.py        # Unit test suite
-├── dataset_builder.py          # Sequence dataset annotation tool
-├── main.py                     # Real-time webcam joint angles overlay tool
-├── pose_analysis.py            # Joint angle and torso lean mathematics
-├── train.py                    # Training template (Random Forest Classifier)
-├── requirements.txt
-└── README.md
+Windows PowerShell:
+
+```powershell
+py -3.11 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 ```
 
----
-
-## ⚡ Install & Setup
-
-Create a Python 3.10+ virtual environment and install the dependencies:
+Linux/macOS:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements-dev.txt
 ```
 
----
+The MediaPipe Pose Landmarker task asset is under `assets/pose_landmarker_lite.task`. It is the same content already tracked at the root of the public `main` branch, moved to match the local project layout.
 
-## 💾 Dataset & Labeling Workflow
-
-The system represents movement sequences rather than independent frames. **ONE ROW = ONE MOVEMENT SEQUENCE**.
-
-### 1. Run the Dataset Creator
-To clip and annotate movement sequences from a video, run:
+## Run the app
 
 ```bash
-python dataset_builder.py --video /path/to/video.mp4 --start-time 2.5 --end-time 4.8 --sample-fps 10
+.\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-If start/end times are omitted, the script will prompt for them in the console.
+On Linux/macOS, use `.venv/bin/python -m streamlit run app.py`.
 
-### 2. Annotation Actions
-*   The script runs pose estimation, aggregates sequence metrics, and plays the clip in an OpenCV loop.
-*   In the console, choose the movement type:
-    *   `LUNGE`, `SMASH_LANDING`, `SCISSOR_JUMP`, `CHANGE_OF_DIRECTION`, `FOOTWORK_SPLIT_STEP`.
-*   Assign the expert risk label:
-    *   `LOW`, `MODERATE`, `HIGH`.
-*   Rows are appended directly to `data/dataset.csv`, raw 33 landmarks for all frames are saved in `data/landmarks/{seq_id}.json`, and the clip is stored in `data/clips/{seq_id}.mp4`.
-
----
-
-## 🏋️ Model Training
-
-To train the Random Forest Classifier on the compiled dataset, execute:
+## Tests and checks
 
 ```bash
-python train.py --csv data/dataset.csv --output models/injury_risk_model.pkl
+.\.venv\Scripts\python.exe -m pytest -q
+.\.venv\Scripts\python.exe -m pip check
 ```
 
-### Data Leakage Prevention
-The training script splits data based on the source `video_id` (representing different players/runs) rather than random rows. This ensures that movement sequences originating from the same video file never appear in both the training and test datasets.
+Use `.venv/bin/python` on Linux/macOS. Tests create temporary fixtures. The audit environment passed 85 tests; this result does not establish Linux compatibility or movement-classification accuracy.
 
----
+## Data and model artifacts
 
-## 🔌 Model Plug-in Process
+This branch intentionally does not include user videos, processed clips, review history, the local labeled dataset, the history database, or serialized classifier artifacts. These files may contain private footage, user labels, or local-only outputs. Supply independently reviewed data and trusted model artifacts locally when needed. The current labeled dataset is too small to support strong generalization claims.
 
-Once data labeling is complete and `train.py` exports the model:
+Pickle model files can execute code when loaded. Only load artifacts from a trusted source. The dashboard may use the documented heuristic baseline when a trained movement model is absent. Automated `LOW`/`MODERATE`/`HIGH` injury-risk prediction remains disabled; rubric output is provisional, uncertain, or unassessed.
 
-1.  Place the generated `injury_risk_model.pkl` in the `models/` directory.
-2.  Start the Streamlit application.
-3.  The sidebar will display `✅ Real Model Loaded` and switch active inference to the trained Scikit-learn model pipeline.
+## Project layout
 
----
+- `app/`, `app.py`: Streamlit application.
+- `src/video/`, `src/pose/`, `src/features/`, `src/detection/`: video and pose processing.
+- `src/classification/`, `src/risk/`: movement classification and conservative rubric observations.
+- `src/detection/manifest.py`: event manifest schema and provenance.
+- `scripts/`: human review and reviewed-data utilities.
+- `training/`: grouped movement-model evaluation and training utilities.
+- `tests/`: unit and integration tests.
+- `docs/rubric_v0.3.md`: current rubric description and limitations.
 
-## 🖥️ Streamlit Web Application
-
-To run the full-stack web dashboard interface:
-
-```bash
-streamlit run app/streamlit_app.py
-```
-
-### Features
-*   **Video Upload**: Supports MP4, AVI, and MOV files.
-*   **Time Slicing**: Set start and end boundaries to extract a specific movement sequence.
-*   **Skeletal Overlays**: View the processed video containing drawing joint points and lines.
-*   **Gauges & Metrics**: Renders calculated minimum knees and elbows flexions, and maximum torso lean.
-*   **Explanation Panel**: Generates structured anatomical explanations explaining the injury-risk score.
-*   **Demo Mode**: Automatically falls back to the threshold-based `IntegrationTestModel` if no real model is present, allowing end-to-end testing.
-*   **History Logs**: Displays a local history table of past analyzed videos powered by SQLite (`data/history.db`).
-
----
-
-## 🧪 Running Unit Tests
-
-Run the test suite verifying mathematical calculations, models, and file pipelines:
-
-```bash
-python -m unittest discover -s tests
-```
+`requirements-lock.txt` from the local folder was not migrated because its pins do not match the verified environment. `requirements.txt` contains the pinned direct runtime dependencies; `requirements-dev.txt` adds the test runner. A clean cross-platform lock has not been generated or tested.
