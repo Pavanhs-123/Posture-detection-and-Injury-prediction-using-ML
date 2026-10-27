@@ -1,0 +1,35 @@
+{
+  "system_title": "Badminton Movement Analysis & Biomechanical Risk Assessment",
+  "pipeline": {
+    "default_sample_fps": 15.0,
+    "min_landmark_confidence": 0.45,
+    "transcode_web_video": true,
+    "max_duration_seconds": 60.0
+  },
+  "movement_categories": [
+    "LUNGE",
+    "SMASH_LANDING",
+    "SCISSOR_JUMP",
+    "CHANGE_OF_DIRECTION",
+    "FOOTWORK_SPLIT_STEP"
+  ],
+  "rubric": {
+    "version": "v0.3",
+    "active_categories": [
+      "LUNGE",
+      "SMASH_LANDING",
+      "CHANGE_OF_DIRECTION"
+    ],
+    "deferred_categories": [
+      "SCISSOR_JUMP",
+      "FOOTWORK_SPLIT_STEP"
+    ],
+    "disclaimer": "Academic engineering prototype for sports screening. Not a certified medical diagnostic device."
+  },
+  "models": {
+    "registry_path": "models/model_registry.json",
+    "primary_risk_model": "models/injury_risk_model.pkl",
+    "primary_movement_classifier": "models/movement_classifier_reviewed_161_rf.pkl",
+    "legacy_movement_classifier": "models/movement_classifier.pkl"
+  }
+}

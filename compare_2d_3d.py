@@ -13,6 +13,8 @@ import os
 import sys
 from pathlib import Path
 import cv2
+import sys
+sys.modules.setdefault("sounddevice", None)
 import mediapipe as mp
 import numpy as np
 

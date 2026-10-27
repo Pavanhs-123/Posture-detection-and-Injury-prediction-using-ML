@@ -5,12 +5,17 @@ and extracts confidence and presence scores.
 """
 
 import os
+import sys
 import urllib.request
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Any, Tuple
 import cv2
 import numpy as np
+
+# This application processes video only. MediaPipe imports an optional
+# microphone helper that initializes PortAudio and can hang in headless runs.
+sys.modules.setdefault("sounddevice", None)
 import mediapipe as mp
 
 MODEL_URL = (

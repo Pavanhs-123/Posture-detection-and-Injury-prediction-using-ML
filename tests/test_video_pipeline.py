@@ -21,6 +21,7 @@ from src.video.video_pipeline import (
     _aggregate_pose_signals,
     _confidence_filtered_measurement,
     _filter_candidates_by_pose_coverage,
+    _resolve_event_classification,
 )
 from src.classification.categories import (
     MOVEMENT_CATEGORIES,
@@ -94,6 +95,14 @@ class TestVideoPipeline(unittest.TestCase):
         self.assertTrue(key_out.exists())
         self.assertGreater(key_out.stat().st_size, 0)
 
+        # Source timestamps outside the video are clamped to an available source frame.
+        before_video = self.temp_path / "keyframe_before_video.jpg"
+        after_video = self.temp_path / "keyframe_after_video.jpg"
+        self.assertTrue(extract_keyframe(str(self.dummy_video_path), -5.0, str(before_video)))
+        self.assertTrue(extract_keyframe(str(self.dummy_video_path), 500.0, str(after_video)))
+        self.assertGreater(before_video.stat().st_size, 0)
+        self.assertGreater(after_video.stat().st_size, 0)
+
     def test_five_movement_categories_schema(self):
         expected_five = [
             "LUNGE",
@@ -136,18 +145,18 @@ class TestVideoPipeline(unittest.TestCase):
         feats = {"left_knee_min": 100.0, "right_knee_min": 100.0, "trunk_angle_max": 10.0}
         res = evaluate_movement_risk("LUNGE", feats, landmark_quality=0.3)
         self.assertFalse(res.is_assessable)
-        self.assertEqual(res.risk_level, "UNCERTAIN")
+        self.assertEqual(res.risk_level, "UNASSESSED")
 
     def test_risk_evaluation_missing_measurements_gate(self):
-        # Missing measurements must evaluate to UNCERTAIN, never default to LOW
+        # Missing measurements must evaluate to UNASSESSED, never default to LOW
         res = evaluate_movement_risk("LUNGE", {}, landmark_quality=0.9)
         self.assertFalse(res.is_assessable)
-        self.assertEqual(res.risk_level, "UNCERTAIN")
+        self.assertEqual(res.risk_level, "UNASSESSED")
 
     def test_risk_evaluation_nonfinite_measurements_gate(self):
         feats = {"left_knee_min": 100.0, "right_knee_min": float("nan"), "trunk_angle_max": 10.0}
         res = evaluate_movement_risk("LUNGE", feats, landmark_quality=0.9)
-        self.assertEqual(res.risk_level, "UNCERTAIN")
+        self.assertEqual(res.risk_level, "UNASSESSED")
         self.assertFalse(res.is_assessable)
 
     def test_pipeline_defaults_deferred_categories_off(self):
@@ -182,6 +191,25 @@ class TestVideoPipeline(unittest.TestCase):
         signals = [{"has_pose": i < 8} for i in range(10)]
         retained = _filter_candidates_by_pose_coverage(candidates, signals, fps=10)
         self.assertEqual(retained, [candidates[0]])
+
+    def test_uncertain_detector_label_keeps_model_suggestion_auditable(self):
+        prediction = SimpleNamespace(
+            predicted_category="CHANGE_OF_DIRECTION",
+            prediction_source="trained_model",
+            probabilities={
+                "CHANGE_OF_DIRECTION": 0.53,
+                "SMASH_LANDING": 0.36,
+                "LUNGE": 0.11,
+            },
+        )
+
+        resolved = _resolve_event_classification("UNCERTAIN", prediction, True)
+
+        self.assertEqual(resolved["movement_category"], "UNCERTAIN")
+        self.assertEqual(resolved["label_source"], "CANDIDATE_DETECTOR")
+        self.assertIn("marked this event ambiguous", resolved["classification_note"])
+        self.assertEqual(prediction.predicted_category, "CHANGE_OF_DIRECTION")
+        self.assertAlmostEqual(sum(prediction.probabilities.values()), 1.0)
 
     def test_trained_classifier_rejects_missing_features_and_deferred_outputs(self):
         classifier = MovementClassifier()
@@ -338,11 +366,24 @@ class TestVideoPipeline(unittest.TestCase):
 
         event = res["events"][0]
         self.assertEqual(event["movement_category"], "UNCERTAIN")
+        self.assertEqual(event["detector_proposal"], "UNCERTAIN")
+        self.assertEqual(event["detector_metrics"]["note"], "Holistic sequence event fallback")
+        self.assertEqual(event["classifier_prediction"], "CHANGE_OF_DIRECTION")
+        self.assertIn("No movement-specific detector criteria", event["classification_note"])
+        self.assertIn("whole-video fallback", event["classification_note"])
+        self.assertIn("do not verify the movement", event["classification_note"])
         self.assertEqual(event["detection_status"], "UNCERTAIN")
         self.assertEqual(event["risk_level"], "UNASSESSED")
         self.assertEqual(event["event_id"], "event_001")
         self.assertEqual(event["localization_method"], "whole_video_fallback")
         self.assertEqual(event["label_source"], "CANDIDATE_DETECTOR")
+        self.assertIsNotNone(event["representative_timestamp"])
+        self.assertEqual(
+            event["representative_frame_index"],
+            round(event["representative_timestamp"] * res["metadata"]["fps"]),
+        )
+        self.assertIsNotNone(event["kinematic_peak_timestamp"])
+        self.assertIn("quality", event["keyframe_selection_reason"])
         self.assertAlmostEqual(event["features"]["trunk_angle_max"], 33.7, delta=0.2)
         self.assertEqual(event["start_time"], 0.0)
         self.assertGreater(event["end_time"], 0.0)
@@ -356,6 +397,264 @@ class TestVideoPipeline(unittest.TestCase):
         self.assertEqual(loaded_events[0].movement_category, "UNCERTAIN")
         self.assertEqual(loaded_events[0].detection_status, "UNCERTAIN")
         self.assertEqual(loaded_events[0].risk_level, "UNASSESSED")
+
+    def test_lower_body_quality_uncoupled_from_occluded_elbow(self):
+        """Regression test for the lunge case: an occluded right elbow must not erase lower-body confidence."""
+        event_signals = []
+        for i in range(10):
+            event_signals.append({
+                "frame_idx": i,
+                "timestamp": i * 0.04,
+                "has_pose": True,
+                "confidence": 0.85,
+                "risk_confidence": 0.12,  # all-joints min dragged down by right elbow
+                "lower_body_confidence": 0.90,  # lower-body min (knees + torso) remains high
+            })
+
+        avg_conf = float(np.mean([s["risk_confidence"] for s in event_signals]))
+        avg_lower_body = float(np.mean([s["lower_body_confidence"] for s in event_signals]))
+
+        self.assertAlmostEqual(avg_conf, 0.12, delta=0.01)
+        self.assertAlmostEqual(avg_lower_body, 0.90, delta=0.01)
+
+        features = {
+            "left_knee_min": 102.1,
+            "right_knee_min": 99.9,
+            "trunk_angle_max": 28.0,
+        }
+        res = evaluate_movement_risk(
+            "LUNGE",
+            features,
+            landmark_quality=avg_conf,
+            lower_body_quality=avg_lower_body,
+        )
+        self.assertTrue(res.is_assessable)
+        self.assertEqual(res.risk_level, "PROVISIONAL")
+        self.assertIn("Unvalidated Cutoffs", res.status_message)
+        self.assertTrue(any("Minimum side-specific event knee angle" in obs for obs in res.observations))
+
+    def test_missing_required_classifier_features_still_prevents_prediction(self):
+        """Strict classifier guard: missing elbow angles must prevent prediction even with good lower-body quality."""
+        classifier = MovementClassifier()
+        classifier.is_trained_model = True
+        classifier.feature_names = list(EXPECTED_FEATURE_NAMES)
+        classifier.model = MagicMock()
+
+        features_missing_elbow = {
+            "left_knee_min": 102.1,
+            "left_knee_max": 178.0,
+            "right_knee_min": 99.9,
+            "right_knee_max": 172.3,
+            "left_elbow_min": 151.8,
+            "left_elbow_max": 179.5,
+            "right_elbow_min": None,
+            "right_elbow_max": None,
+            "trunk_angle_min": 6.0,
+            "trunk_angle_max": 28.0,
+        }
+
+        res = classifier.predict(features_missing_elbow)
+        self.assertEqual(res.predicted_category, "UNCERTAIN")
+        self.assertEqual(res.prediction_source, "unavailable")
+        self.assertIsNone(res.probabilities)
+        classifier.model.predict.assert_not_called()
+
+    def test_genuinely_poor_lower_body_evidence_is_unassessed(self):
+        """Genuinely poor knee/trunk quality (< 0.45) must return UNASSESSED risk assessment."""
+        features = {
+            "left_knee_min": 102.1,
+            "right_knee_min": 99.9,
+            "trunk_angle_max": 28.0,
+        }
+        res = evaluate_movement_risk(
+            "LUNGE",
+            features,
+            landmark_quality=0.80,
+            lower_body_quality=0.35,  # Genuinely low knee/trunk tracking quality
+        )
+        self.assertFalse(res.is_assessable)
+        self.assertEqual(res.risk_level, "UNASSESSED")
+        self.assertIn("UNASSESSED (Low Landmark Quality)", res.status_message)
+        self.assertIn("minimum 0.45", res.observations[0])
+
+    def test_missing_knee_trunk_measurements_are_unassessed(self):
+        """Missing knee/trunk angles must return UNASSESSED even with high tracking quality."""
+        features_missing_knee = {
+            "left_knee_min": None,
+            "right_knee_min": 99.9,
+            "trunk_angle_max": 28.0,
+        }
+        res = evaluate_movement_risk(
+            "LUNGE",
+            features_missing_knee,
+            landmark_quality=0.95,
+            lower_body_quality=0.95,
+        )
+        self.assertFalse(res.is_assessable)
+        self.assertEqual(res.risk_level, "UNASSESSED")
+        self.assertIn("UNASSESSED (Incomplete Kinematics)", res.status_message)
+
+    def test_manifest_serialization_with_lower_body_quality(self):
+        """MovementEventRecord serializes lower_body_quality and supports backwards compatibility."""
+        record = MovementEventRecord(
+            event_id="ev_002",
+            video_id="test2.mp4",
+            source_video="/path/to/test2.mp4",
+            start_time=1.0,
+            end_time=2.5,
+            start_frame=30,
+            end_frame=75,
+            movement_category="LUNGE",
+            pose_quality=0.12,
+            lower_body_quality=0.85,
+        )
+        d = record.to_dict()
+        self.assertEqual(d["pose_quality"], 0.12)
+        self.assertEqual(d["lower_body_quality"], 0.85)
+
+        restored = MovementEventRecord.from_dict(d)
+        self.assertEqual(restored.lower_body_quality, 0.85)
+
+        # Legacy dict without lower_body_quality
+        d_legacy = {k: v for k, v in d.items() if k != "lower_body_quality"}
+        restored_legacy = MovementEventRecord.from_dict(d_legacy)
+        self.assertIsNone(restored_legacy.lower_body_quality)
+
+    def test_tracking_loss_emits_none_and_resets_velocity(self):
+        """When pose tracking fails, signals must emit None (not 180 or 0.5) and reset hip velocity."""
+        signals = []
+        prev_hip_x = prev_hip_y = None
+        # Simulate 3 frames: [tracking ok at (0.5, 0.5)] -> [tracking lost] -> [reacquired at (0.8, 0.8)]
+        frames_meta = [
+            (True, (0.5, 0.5), 120.0),
+            (False, None, None),
+            (True, (0.8, 0.8), 110.0),
+        ]
+        sample_fps = 15.0
+        for has_pose, pos, knee_val in frames_meta:
+            if has_pose and pos is not None:
+                hx, hy = pos
+                if prev_hip_x is not None and prev_hip_y is not None:
+                    hip_vx = (hx - prev_hip_x) * sample_fps
+                    hip_vy = (hy - prev_hip_y) * sample_fps
+                else:
+                    hip_vx = 0.0
+                    hip_vy = 0.0
+                prev_hip_x, prev_hip_y = hx, hy
+                signals.append({
+                    "has_pose": True,
+                    "hip_x": hx, "hip_y": hy,
+                    "knee_l": knee_val, "min_knee": knee_val,
+                    "hip_vx": hip_vx, "hip_vy": hip_vy,
+                })
+            else:
+                prev_hip_x = prev_hip_y = None
+                signals.append({
+                    "has_pose": False,
+                    "hip_x": None, "hip_y": None,
+                    "knee_l": None, "knee_r": None, "min_knee": None,
+                    "hip_vx": 0.0, "hip_vy": 0.0,
+                })
+
+        # Check frame 1 (lost tracking)
+        self.assertFalse(signals[1]["has_pose"])
+        self.assertIsNone(signals[1]["knee_l"])
+        self.assertIsNone(signals[1]["min_knee"])
+        self.assertIsNone(signals[1]["hip_x"])
+        self.assertEqual(signals[1]["hip_vx"], 0.0)
+
+        # Check frame 2 (reacquired): velocity must NOT spike across the gap
+        self.assertTrue(signals[2]["has_pose"])
+        self.assertEqual(signals[2]["hip_vx"], 0.0)
+        self.assertEqual(signals[2]["hip_vy"], 0.0)
+
+
+    def test_tracking_loss_sequence_aggregation_and_risk_gating(self):
+        """Integration test: tracking loss leaves features as None, resets velocity, and forces UNASSESSED risk."""
+        sample_fps = 15.0
+        signals = []
+        prev_hip_x = prev_hip_y = None
+
+        # 15-frame sequence: 5 frames tracking -> 5 frames tracking loss -> 5 frames reacquired
+        for i in range(15):
+            if 5 <= i < 10:
+                has_pose = False
+                hx = hy = None
+                knee_val = None
+            else:
+                has_pose = True
+                hx = 0.5 + (0.02 * i if i < 5 else 0.2 + 0.01 * (i - 10))
+                hy = 0.6 + (0.01 * i if i < 5 else 0.1 + 0.01 * (i - 10))
+                knee_val = 110.0 if i < 5 else 105.0
+
+            if has_pose and hx is not None:
+                if prev_hip_x is not None and prev_hip_y is not None:
+                    hip_vx = (hx - prev_hip_x) * sample_fps
+                    hip_vy = (hy - prev_hip_y) * sample_fps
+                else:
+                    hip_vx = 0.0
+                    hip_vy = 0.0
+                prev_hip_x, prev_hip_y = hx, hy
+                signals.append({
+                    "frame_idx": i,
+                    "timestamp": i / sample_fps,
+                    "has_pose": True,
+                    "hip_x": hx, "hip_y": hy,
+                    "feature_knee_l": knee_val,
+                    "feature_knee_r": knee_val,
+                    "feature_torso_lean": 12.0,
+                    "feature_elbow_l": 150.0,
+                    "feature_elbow_r": 150.0,
+                    "hip_vx": hip_vx,
+                    "hip_vy": hip_vy,
+                    "lower_body_confidence": 0.88,
+                })
+            else:
+                prev_hip_x = prev_hip_y = None
+                signals.append({
+                    "frame_idx": i,
+                    "timestamp": i / sample_fps,
+                    "has_pose": False,
+                    "hip_x": None, "hip_y": None,
+                    "feature_knee_l": None,
+                    "feature_knee_r": None,
+                    "feature_torso_lean": None,
+                    "feature_elbow_l": None,
+                    "feature_elbow_r": None,
+                    "hip_vx": 0.0,
+                    "hip_vy": 0.0,
+                    "lower_body_confidence": 0.0,
+                })
+
+        # 1. Verify tracking loss window (frames 5-9) has None features and 0 velocity
+        for k in range(5, 10):
+            self.assertFalse(signals[k]["has_pose"])
+            self.assertIsNone(signals[k]["feature_knee_l"])
+            self.assertEqual(signals[k]["hip_vx"], 0.0)
+
+        # 2. Verify reacquisition frame (frame 10) resets velocity to 0.0 (no spike across gap)
+        self.assertTrue(signals[10]["has_pose"])
+        self.assertEqual(signals[10]["hip_vx"], 0.0)
+        self.assertEqual(signals[10]["hip_vy"], 0.0)
+
+        # 3. Verify next frame (frame 11) resumes velocity smoothly
+        self.assertGreater(signals[11]["hip_vx"], 0.0)
+
+        # 4. Aggregate features during the tracking loss window (frames 5-9)
+        loss_window = signals[5:10]
+        agg_loss = _aggregate_pose_signals(loss_window)
+        # Must be None, NEVER artificial neutral sentinels (180.0 or 0.0)
+        self.assertIsNone(agg_loss["left_knee_min"])
+        self.assertIsNone(agg_loss["right_knee_min"])
+        self.assertIsNone(agg_loss["trunk_angle_max"])
+
+        # 5. Risk scoring must return UNASSESSED with None score
+        risk_res = evaluate_movement_risk("LUNGE", agg_loss, lower_body_quality=0.88)
+        self.assertFalse(risk_res.is_assessable)
+        self.assertEqual(risk_res.risk_level, "UNASSESSED")
+        self.assertIsNone(risk_res.score)
+        self.assertEqual(risk_res.screening_category, "UNASSESSED")
+        self.assertIn("UNASSESSED (Incomplete Kinematics)", risk_res.status_message)
 
 
 if __name__ == "__main__":

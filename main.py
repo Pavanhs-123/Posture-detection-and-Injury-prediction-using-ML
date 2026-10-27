@@ -3,6 +3,8 @@ import os
 import time
 
 import cv2
+import sys
+sys.modules.setdefault("sounddevice", None)
 import mediapipe as mp
 
 from pose_analysis import MODEL_PATH, ensure_model_file, extract_pose_features

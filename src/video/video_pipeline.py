@@ -5,6 +5,7 @@ event candidate detection, 5-class movement classification, clip/keyframe extrac
 rubric v0.3 risk evaluation, and manifest generation.
 """
 
+import json
 import os
 import time
 from pathlib import Path
@@ -37,6 +38,9 @@ from src.detection.manifest import (
 from src.classification.predictor import MovementClassifier
 from src.risk.evaluator import evaluate_movement_risk
 
+MIN_RELIABLE_PEAK_QUALITY = 0.45
+REVIEW_WINDOW_CONTEXT_SECONDS = 0.5
+
 
 def _aggregate_pose_signals(signals: List[Dict[str, Any]]) -> Dict[str, Optional[float]]:
     """Aggregate finite pose measurements only; no-pose placeholders are not observations."""
@@ -67,6 +71,58 @@ def _aggregate_pose_signals(signals: List[Dict[str, Any]]) -> Dict[str, Optional
     return result
 
 
+def _resolve_event_classification(
+    candidate_category: Optional[str],
+    prediction: Any,
+    classifier_is_trained: bool,
+) -> Dict[str, str]:
+    """Keep the final event label and classifier suggestion separately auditable."""
+    detector_proposal = (candidate_category or "").strip().upper()
+    classifier_prediction = str(
+        getattr(prediction, "predicted_category", "UNCERTAIN") or "UNCERTAIN"
+    ).strip().upper()
+
+    if detector_proposal == "UNCERTAIN":
+        return {
+            "movement_category": "UNCERTAIN",
+            "label_source": "CANDIDATE_DETECTOR",
+            "classification_note": (
+                "The detector marked this event ambiguous. The classifier suggestion and "
+                "probabilities are shown for review, but do not resolve detector uncertainty."
+            ),
+        }
+
+    if classifier_is_trained:
+        if classifier_prediction == "UNCERTAIN":
+            note = "The trained classifier could not assign an active movement class to this event."
+            gate_reason = getattr(prediction, "status_message", "")
+            if gate_reason:
+                note += f" Quality gate: {gate_reason}"
+        else:
+            note = "Final event class follows the trained classifier prediction."
+        return {
+            "movement_category": classifier_prediction,
+            "label_source": "CLASSIFIER_MODEL",
+            "classification_note": note,
+        }
+
+    if detector_proposal:
+        return {
+            "movement_category": detector_proposal,
+            "label_source": "CANDIDATE_DETECTOR",
+            "classification_note": "No trained classifier was loaded; the detector proposal is shown.",
+        }
+
+    prediction_source = getattr(prediction, "prediction_source", "heuristic")
+    return {
+        "movement_category": classifier_prediction,
+        "label_source": (
+            "CLASSIFIER_HEURISTIC" if prediction_source == "heuristic" else "CLASSIFIER_MODEL"
+        ),
+        "classification_note": "Final event class follows the available classifier prediction.",
+    }
+
+
 def _confidence_filtered_measurement(value: Optional[float], confidence: Any, threshold: float = 0.4) -> Optional[float]:
     """Discard missing, non-finite, or low-visibility joint measurements."""
     try:
@@ -89,6 +145,231 @@ def _filter_candidates_by_pose_coverage(candidates: List[Any], signals: List[Dic
         if window and sum(bool(frame.get("has_pose")) for frame in window) / len(window) >= minimum:
             retained.append(candidate)
     return retained
+
+
+def _select_representative_frame(
+    signals: List[Dict[str, Any]],
+    start_time: float,
+    end_time: float,
+    fps: float,
+    total_frames: int,
+    min_quality: float = 0.45,
+    context_seconds: float = 0.12,
+) -> Dict[str, Any]:
+    """Choose a source-frame keyframe from a temporally supported, quality-gated pose peak."""
+    try:
+        fps = float(fps)
+    except (TypeError, ValueError):
+        fps = 0.0
+    if not np.isfinite(fps) or fps <= 0:
+        fps = 30.0
+
+    try:
+        frame_count = int(total_frames)
+    except (TypeError, ValueError):
+        frame_count = 0
+    if frame_count <= 0:
+        frame_count = len(signals)
+    if frame_count <= 0:
+        return {
+            "representative_timestamp": 0.0,
+            "representative_frame_index": 0,
+            "kinematic_peak_timestamp": None,
+            "kinematic_peak_frame_index": None,
+            "keyframe_selection_reason": "No source frames were available; used frame 0 fallback.",
+        }
+
+    max_frame = frame_count - 1
+    max_timestamp = max_frame / fps
+    try:
+        raw_start = float(start_time)
+    except (TypeError, ValueError):
+        raw_start = 0.0
+    try:
+        raw_end = float(end_time)
+    except (TypeError, ValueError):
+        raw_end = max_timestamp
+    if not np.isfinite(raw_start):
+        raw_start = 0.0
+    if not np.isfinite(raw_end):
+        raw_end = max_timestamp
+    lower = min(max(raw_start, 0.0), max_timestamp)
+    upper = min(max(raw_end, 0.0), max_timestamp)
+    if upper < lower:
+        lower, upper = upper, lower
+    midpoint = (lower + upper) / 2.0
+    was_clamped = lower != raw_start or upper != raw_end
+
+    pose_frames: List[Dict[str, Any]] = []
+    knee_frames: List[Dict[str, Any]] = []
+    frame_tolerance = max(0.51 / fps, 0.01)
+    for signal in signals:
+        if not signal.get("has_pose"):
+            continue
+        try:
+            raw_index = float(signal.get("frame_idx"))
+            frame_index = int(raw_index)
+            timestamp = float(signal.get("timestamp"))
+            quality = float(signal.get("lower_body_confidence", signal.get("confidence", 0.0)))
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if (
+            not np.isfinite(raw_index)
+            or raw_index != frame_index
+            or frame_index < 0
+            or frame_index > max_frame
+            or not np.isfinite(timestamp)
+            or not np.isfinite(quality)
+            or abs(timestamp - frame_index / fps) > frame_tolerance
+            or timestamp < lower - 1e-6
+            or timestamp > upper + 1e-6
+            or quality < min_quality
+        ):
+            continue
+
+        frame = {
+            "timestamp": frame_index / fps,
+            "frame_index": frame_index,
+            "quality": quality,
+        }
+        pose_frames.append(frame)
+        try:
+            knee_l = float(signal.get("feature_knee_l"))
+            knee_r = float(signal.get("feature_knee_r"))
+        except (TypeError, ValueError):
+            continue
+        if (
+            np.isfinite(knee_l)
+            and np.isfinite(knee_r)
+            and 0.0 < knee_l <= 180.0
+            and 0.0 < knee_r <= 180.0
+        ):
+            knee_frames.append({**frame, "flexion_angle": min(knee_l, knee_r)})
+
+    peak_candidates = []
+    for frame in knee_frames:
+        neighborhood = [
+            candidate["flexion_angle"]
+            for candidate in knee_frames
+            if abs(candidate["timestamp"] - frame["timestamp"]) <= context_seconds
+        ]
+        if len(neighborhood) >= 3:
+            peak_candidates.append({
+                **frame,
+                "smoothed_flexion": float(np.median(neighborhood)),
+            })
+
+    if peak_candidates:
+        selected = min(
+            peak_candidates,
+            key=lambda frame: (
+                frame["smoothed_flexion"],
+                -frame["quality"],
+                abs(frame["timestamp"] - midpoint),
+            ),
+        )
+        reason = (
+            "Most flexed reliable knee frame; local median over "
+            f"±{context_seconds:.2f}s with lower-body/trunk quality ≥ {min_quality:.2f}."
+        )
+        peak_timestamp: Optional[float] = selected["timestamp"]
+        peak_frame_index: Optional[int] = selected["frame_index"]
+    elif pose_frames:
+        selected = min(
+            pose_frames,
+            key=lambda frame: (-frame["quality"], abs(frame["timestamp"] - midpoint)),
+        )
+        reason = (
+            "No reliable temporally supported knee peak; selected the highest-quality pose "
+            "frame nearest the event midpoint."
+        )
+        peak_timestamp = None
+        peak_frame_index = None
+    else:
+        frame_index = min(max(int(round(midpoint * fps)), 0), max_frame)
+        selected = {"timestamp": frame_index / fps, "frame_index": frame_index}
+        reason = "No reliable pose frame was available; used the clamped event midpoint."
+        peak_timestamp = None
+        peak_frame_index = None
+
+    if was_clamped:
+        reason += " Event bounds were clamped to available source frames."
+    return {
+        "representative_timestamp": round(float(selected["timestamp"]), 4),
+        "representative_frame_index": int(selected["frame_index"]),
+        "kinematic_peak_timestamp": round(float(peak_timestamp), 4) if peak_timestamp is not None else None,
+        "kinematic_peak_frame_index": int(peak_frame_index) if peak_frame_index is not None else None,
+        "keyframe_selection_reason": reason,
+    }
+
+
+def _relocalize_low_quality_candidates(
+    candidates: List[Any],
+    signals: List[Dict[str, Any]],
+    fps: float,
+    total_frames: int,
+    duration: float,
+    detector: MovementCandidateDetector,
+) -> tuple[List[Any], set[int]]:
+    """Replace low-quality, off-peak detector windows with explicit uncertain review windows."""
+    localized: List[Any] = []
+    review_window_ids: set[int] = set()
+    reliable_peak = _select_representative_frame(
+        signals, 0.0, duration, fps, total_frames,
+        min_quality=MIN_RELIABLE_PEAK_QUALITY,
+    )
+    peak_time = reliable_peak.get("kinematic_peak_timestamp")
+
+    for candidate in candidates:
+        window = [
+            signal for signal in signals
+            if candidate.start_time - 1e-6 <= signal.get("timestamp", -1.0) <= candidate.end_time + 1e-6
+        ]
+        quality_values = []
+        for signal in window:
+            try:
+                quality = float(signal.get("lower_body_confidence", signal.get("confidence", 0.0)))
+            except (TypeError, ValueError):
+                quality = 0.0
+            quality_values.append(quality if np.isfinite(quality) else 0.0)
+        mean_quality = float(np.mean(quality_values)) if quality_values else 0.0
+
+        if (
+            mean_quality < MIN_RELIABLE_PEAK_QUALITY
+            and peak_time is not None
+            and not (candidate.start_time <= peak_time <= candidate.end_time)
+        ):
+            source_max_time = max(0.0, (max(total_frames, 1) - 1) / fps)
+            review_start = max(0.0, peak_time - REVIEW_WINDOW_CONTEXT_SECONDS)
+            review_end = min(source_max_time, peak_time + REVIEW_WINDOW_CONTEXT_SECONDS)
+            if review_end - review_start >= 0.6:
+                metrics = {
+                    "reason": "Low-quality detector window did not contain the best reliable full-source knee-flexion peak.",
+                    "original_detector_proposal": candidate.proposed_movement,
+                    "original_candidate_score": candidate.heuristic_score,
+                    "original_candidate_start_time": candidate.start_time,
+                    "original_candidate_end_time": candidate.end_time,
+                    "original_candidate_lower_body_quality": round(mean_quality, 3),
+                    "review_peak_timestamp": peak_time,
+                    "review_peak_frame_index": reliable_peak["kinematic_peak_frame_index"],
+                    "peak_quality_threshold": MIN_RELIABLE_PEAK_QUALITY,
+                    "review_context_seconds": REVIEW_WINDOW_CONTEXT_SECONDS,
+                }
+                replacement = detector._create_candidate(
+                    video_id=candidate.video_id,
+                    category="UNCERTAIN",
+                    start_time=review_start,
+                    end_time=review_end,
+                    score=0.4,
+                    metrics=metrics,
+                    status="REVIEW_REQUIRED",
+                )
+                localized.append(replacement)
+                review_window_ids.add(id(replacement))
+                continue
+        localized.append(candidate)
+
+    return localized, review_window_ids
 
 
 class VideoProcessingPipeline:
@@ -259,6 +540,10 @@ class VideoProcessingPipeline:
                             float(getattr(pose_res, key, fallback_conf))
                             for key in ("left_knee_conf", "right_knee_conf", "left_elbow_conf", "right_elbow_conf", "torso_conf")
                         ),
+                        "lower_body_confidence": min(
+                            float(getattr(pose_res, key, fallback_conf))
+                            for key in ("left_knee_conf", "right_knee_conf", "torso_conf")
+                        ),
                         "hip_vx": hip_vx,
                         "hip_vy": hip_vy,
                     })
@@ -267,17 +552,22 @@ class VideoProcessingPipeline:
                     overlay_frame = draw_skeleton_overlay(frame, lms, {"left_knee": lk, "right_knee": rk})
                     ann_writer.write(overlay_frame)
                 else:
+                    prev_hip_x = prev_hip_y = None
                     signals.append({
                         "frame_idx": frame_idx,
                         "timestamp": timestamp_sec,
                         "has_pose": False,
-                        "hip_x": 0.5, "hip_y": 0.5, "hip_z": 0.0,
-                        "ankle_l_x": 0.5, "ankle_l_y": 0.9, "ankle_r_x": 0.5, "ankle_r_y": 0.9,
-                        "ankle_dist": 0.1, "wrist_l_y": 0.5, "wrist_r_y": 0.5, "shoulder_y": 0.3,
-                        "knee_l": 180.0, "knee_r": 180.0, "min_knee": 180.0,
-                        "elbow_l": 180.0, "elbow_r": 180.0, "max_elbow": 180.0,
-                        "torso_lean": 0.0, "confidence": 0.0,
+                        "hip_x": None, "hip_y": None, "hip_z": None,
+                        "ankle_l_x": None, "ankle_l_y": None, "ankle_r_x": None, "ankle_r_y": None,
+                        "ankle_dist": None, "wrist_l_y": None, "wrist_r_y": None, "shoulder_y": None,
+                        "knee_l": None, "knee_r": None, "min_knee": None,
+                        "feature_knee_l": None, "feature_knee_r": None,
+                        "elbow_l": None, "elbow_r": None, "max_elbow": None,
+                        "feature_elbow_l": None, "feature_elbow_r": None,
+                        "torso_lean": None, "feature_torso_lean": None,
+                        "confidence": 0.0,
                         "risk_confidence": 0.0,
+                        "lower_body_confidence": 0.0,
                         "hip_vx": 0.0, "hip_vy": 0.0,
                     })
                     ann_writer.write(frame)
@@ -318,6 +608,14 @@ class VideoProcessingPipeline:
         detector = MovementCandidateDetector(config)
         candidates = detector.detect_candidates_from_signals(signals, Path(video_path).name)
         candidates = _filter_candidates_by_pose_coverage(candidates, signals, src_fps)
+        candidates, review_window_candidate_ids = _relocalize_low_quality_candidates(
+            candidates,
+            signals,
+            src_fps,
+            total_frames,
+            duration,
+            detector,
+        )
         fallback_candidate_ids = set()
 
         # Fallback if no specific event was triggered in a video with poses
@@ -349,9 +647,19 @@ class VideoProcessingPipeline:
             # Sub-clip extraction
             extract_subclip(video_path, cand.start_time, cand.end_time, str(clip_path))
 
-            # Keyframe extraction (at center or peak of event)
-            key_time = (cand.start_time + cand.end_time) / 2.0
-            extract_keyframe(video_path, key_time, str(keyframe_path))
+            # Select and extract an auditable source frame from the full event interval.
+            keyframe_info = _select_representative_frame(
+                signals,
+                cand.start_time,
+                cand.end_time,
+                src_fps,
+                total_frames,
+            )
+            extract_keyframe(
+                video_path,
+                keyframe_info["representative_timestamp"],
+                str(keyframe_path),
+            )
 
             # Extract event frame features
             start_f = max(0, int(round(cand.start_time * src_fps)))
@@ -369,27 +677,50 @@ class VideoProcessingPipeline:
                 feature_status = "PARTIAL"
 
             avg_conf = float(np.mean([s.get("risk_confidence", s["confidence"]) for s in event_signals])) if event_signals else 0.0
+            avg_lower_body_conf = float(
+                np.mean([s.get("lower_body_confidence", s.get("confidence", 0.0)) for s in event_signals])
+            ) if event_signals else 0.0
 
             # Classification
             pred_res = self.classifier.predict(feature_dict)
 
-            # Preserve detector uncertainty for human review.
-            # A classifier prediction alone must not resolve an ambiguous detection.
-            if cand.proposed_movement == "UNCERTAIN":
-                final_category = "UNCERTAIN"
-                label_source = "CANDIDATE_DETECTOR"
-            elif self.classifier.is_trained_model:
-                final_category = pred_res.predicted_category
-                label_source = "CLASSIFIER_MODEL"
-            elif cand.proposed_movement:
-                final_category = cand.proposed_movement
-                label_source = "CANDIDATE_DETECTOR"
-            else:
-                final_category = pred_res.predicted_category
-                label_source = "CLASSIFIER_HEURISTIC"
+            # Preserve detector uncertainty for human review while recording the
+            # classifier's separate suggestion so displayed probabilities are interpretable.
+            classification = _resolve_event_classification(
+                cand.proposed_movement,
+                pred_res,
+                self.classifier.is_trained_model,
+            )
+            if id(cand) in fallback_candidate_ids:
+                classification["classification_note"] = (
+                    "No movement-specific detector criteria produced an event, so the "
+                    "pipeline created a whole-video fallback and kept its label UNCERTAIN. "
+                    "The classifier suggestion and probabilities are shown for review; "
+                    "they do not verify the movement or override detector uncertainty."
+                )
+            elif id(cand) in review_window_candidate_ids:
+                classification["classification_note"] = (
+                    "The original detector window had low lower-body quality and did not "
+                    "contain the best reliable full-source knee-flexion peak. A focused "
+                    "UNCERTAIN review window was placed around that peak; this does not "
+                    "confirm a movement class. Review the full event clip and source video."
+                )
+            final_category = classification["movement_category"]
+            label_source = classification["label_source"]
+            try:
+                detector_metrics = json.loads(cand.key_metrics) if cand.key_metrics else {}
+                if not isinstance(detector_metrics, dict):
+                    detector_metrics = {"details": detector_metrics}
+            except (TypeError, ValueError):
+                detector_metrics = {"details": str(cand.key_metrics)}
 
             # Biomechanical Risk Assessment (Rubric v0.3)
-            risk_result = evaluate_movement_risk(final_category, feature_dict, landmark_quality=avg_conf)
+            risk_result = evaluate_movement_risk(
+                final_category,
+                feature_dict,
+                landmark_quality=avg_conf,
+                lower_body_quality=avg_lower_body_conf,
+            )
 
             record = MovementEventRecord(
                 event_id=e_id,
@@ -400,17 +731,35 @@ class VideoProcessingPipeline:
                 start_frame=start_f,
                 end_frame=end_f,
                 movement_category=final_category,
-                localization_method=("whole_video_fallback" if id(cand) in fallback_candidate_ids else "candidate_detector"),
+                localization_method=(
+                    "whole_video_fallback" if id(cand) in fallback_candidate_ids
+                    else "kinematic_peak_review_window" if id(cand) in review_window_candidate_ids
+                    else "candidate_detector"
+                ),
                 detection_status="UNCERTAIN" if final_category == "UNCERTAIN" else "PROPOSED",
                 representative_frame=str(keyframe_path),
+                representative_timestamp=keyframe_info["representative_timestamp"],
+                representative_frame_index=keyframe_info["representative_frame_index"],
+                kinematic_peak_timestamp=keyframe_info["kinematic_peak_timestamp"],
+                kinematic_peak_frame_index=keyframe_info["kinematic_peak_frame_index"],
+                keyframe_selection_reason=keyframe_info["keyframe_selection_reason"],
                 clip_path=str(clip_path),
                 pose_quality=round(avg_conf, 3),
+                lower_body_quality=round(avg_lower_body_conf, 3),
+                detector_proposal=(cand.proposed_movement or "") or None,
+                detector_metrics=detector_metrics,
+                classifier_prediction=pred_res.predicted_category,
+                classification_note=classification["classification_note"],
                 feature_extraction_status=feature_status,
                 annotation_status="AUTO_PROPOSED",
                 label_source=label_source,
                 rubric_version="v0.3",
                 risk_level=risk_result.risk_level,
                 risk_observations=risk_result.observations,
+                risk_missing_evidence=risk_result.missing_evidence,
+                risk_score=risk_result.score,
+                risk_category=risk_result.screening_category,
+                risk_contributions=risk_result.contributing_indicators,
                 features=feature_dict,
                 probabilities=pred_res.probabilities,
                 prediction_source=pred_res.prediction_source,

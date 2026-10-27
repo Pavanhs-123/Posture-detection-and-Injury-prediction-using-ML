@@ -1,0 +1,158 @@
+{
+  "dataset_rows": 161,
+  "players": 6,
+  "class_counts": {
+    "SMASH_LANDING": 72,
+    "CHANGE_OF_DIRECTION": 45,
+    "LUNGE": 44
+  },
+  "group_cv": "GroupKFold(n_splits=3) by player_id; six players total; test folds contain 1, 2, and 3 players.",
+  "folds": [
+    {
+      "fold": 1,
+      "train_rows": 83,
+      "test_rows": 78,
+      "train_players": [
+        "player_01",
+        "player_02",
+        "player_03",
+        "player_04",
+        "player_06"
+      ],
+      "test_players": [
+        "player_05"
+      ],
+      "class_support": {
+        "LUNGE": 23,
+        "SMASH_LANDING": 41,
+        "CHANGE_OF_DIRECTION": 14
+      },
+      "macro_f1": 0.532
+    },
+    {
+      "fold": 2,
+      "train_rows": 122,
+      "test_rows": 39,
+      "train_players": [
+        "player_01",
+        "player_03",
+        "player_04",
+        "player_05"
+      ],
+      "test_players": [
+        "player_02",
+        "player_06"
+      ],
+      "class_support": {
+        "LUNGE": 11,
+        "SMASH_LANDING": 7,
+        "CHANGE_OF_DIRECTION": 21
+      },
+      "macro_f1": 0.5693
+    },
+    {
+      "fold": 3,
+      "train_rows": 117,
+      "test_rows": 44,
+      "train_players": [
+        "player_02",
+        "player_05",
+        "player_06"
+      ],
+      "test_players": [
+        "player_01",
+        "player_03",
+        "player_04"
+      ],
+      "class_support": {
+        "LUNGE": 10,
+        "SMASH_LANDING": 24,
+        "CHANGE_OF_DIRECTION": 10
+      },
+      "macro_f1": 0.6263
+    }
+  ],
+  "random_forest_oof": {
+    "macro_f1": 0.5797,
+    "accuracy": 0.6211,
+    "per_class": {
+      "LUNGE": {
+        "precision": 0.5882,
+        "recall": 0.4545,
+        "f1-score": 0.5128,
+        "support": 44.0
+      },
+      "SMASH_LANDING": {
+        "precision": 0.7792,
+        "recall": 0.8333,
+        "f1-score": 0.8054,
+        "support": 72.0
+      },
+      "CHANGE_OF_DIRECTION": {
+        "precision": 0.4,
+        "recall": 0.4444,
+        "f1-score": 0.4211,
+        "support": 45.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        20,
+        4,
+        20
+      ],
+      [
+        2,
+        60,
+        10
+      ],
+      [
+        12,
+        13,
+        20
+      ]
+    ]
+  },
+  "heuristic_baseline_full_reviewed_set": {
+    "macro_f1": 0.3545,
+    "accuracy": 0.3292,
+    "per_class": {
+      "LUNGE": {
+        "precision": 0.3,
+        "recall": 0.3409,
+        "f1-score": 0.3191,
+        "support": 44.0
+      },
+      "SMASH_LANDING": {
+        "precision": 0.6667,
+        "recall": 0.3889,
+        "f1-score": 0.4912,
+        "support": 72.0
+      },
+      "CHANGE_OF_DIRECTION": {
+        "precision": 0.2941,
+        "recall": 0.2222,
+        "f1-score": 0.2532,
+        "support": 45.0
+      }
+    },
+    "confusion_matrix": [
+      [
+        15,
+        1,
+        20
+      ],
+      [
+        19,
+        28,
+        4
+      ],
+      [
+        16,
+        13,
+        10
+      ]
+    ],
+    "evaluation_note": "Rule-based baseline evaluated on all reviewed events; it is a diagnostic comparison, not a player-held-out ML model."
+  }
+}

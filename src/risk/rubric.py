@@ -1,10 +1,10 @@
 """
-Biomechanical Risk Rubric v0.3 specification and status constants.
+Biomechanical Risk Rubric v0.3 specification, status constants, and scoring thresholds.
 
 IMPORTANT ARCHITECTURAL DIRECTIVE:
-Under Biomechanical Risk Rubric v0.3, the H1 cluster-scoring hypothesis remains unvalidated
-and numerical indicator cutoffs remain intentionally unspecified pending empirical biomechanical trials.
-No automated LOW, MODERATE, or HIGH risk decisions may be assigned by heuristics.
+Under Biomechanical Risk Rubric v0.3, numerical scores (0-100) and screening categories
+(LOW, MODERATE, HIGH) are provisional engineering screening benchmarks derived from published
+sports science kinematics. They are NOT certified medical diagnoses or clinical injury outcome predictions.
 """
 
 from typing import List
@@ -34,3 +34,26 @@ DEFERRED_RUBRIC_CATEGORIES: List[str] = [
     "SCISSOR_JUMP",
     "FOOTWORK_SPLIT_STEP",
 ]
+
+# Numerical Screening Categories
+CATEGORY_LOW = "LOW"
+CATEGORY_MODERATE = "MODERATE"
+CATEGORY_HIGH = "HIGH"
+CATEGORY_UNASSESSED = "UNASSESSED"
+
+SCREENING_CATEGORIES: List[str] = [
+    CATEGORY_LOW,
+    CATEGORY_MODERATE,
+    CATEGORY_HIGH,
+    CATEGORY_UNASSESSED,
+]
+
+# Indicator Weight Capacities (Total = 100.0 max)
+MAX_KNEE_POINTS = 40.0
+MAX_TRUNK_POINTS = 35.0
+MAX_ASYMMETRY_POINTS = 25.0
+
+# Provisional Engineering Score Category Boundaries
+SCORE_BAND_LOW_MAX = 30.0       # [0.0, 30.0) -> LOW
+SCORE_BAND_MODERATE_MAX = 60.0  # [30.0, 60.0) -> MODERATE
+                                # [60.0, 100.0] -> HIGH

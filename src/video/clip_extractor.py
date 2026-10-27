@@ -126,8 +126,17 @@ def extract_keyframe(
     if fps <= 0:
         fps = 30.0
 
-    target_frame = int(round(timestamp_sec * fps))
-    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, target_frame))
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    try:
+        timestamp_sec = float(timestamp_sec)
+    except (TypeError, ValueError):
+        timestamp_sec = 0.0
+    if not np.isfinite(timestamp_sec):
+        timestamp_sec = 0.0
+    target_frame = max(0, int(round(timestamp_sec * fps)))
+    if frame_count > 0:
+        target_frame = min(target_frame, frame_count - 1)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
     ret, frame = cap.read()
 
     if not ret or frame is None:

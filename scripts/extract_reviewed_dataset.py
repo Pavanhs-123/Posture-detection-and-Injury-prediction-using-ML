@@ -23,12 +23,17 @@ from typing import Dict, Any, List, Optional, Tuple
 import cv2
 import numpy as np
 
+# This project is video-only. MediaPipe imports an optional microphone helper
+# that initializes PortAudio at import time; headless environments can hang there.
+# Mark the optional audio module unavailable before importing MediaPipe.
+sys.modules.setdefault("sounddevice", None)
+import mediapipe as mp
+
 # Ensure root directory is on sys.path
 root_dir = Path(__file__).resolve().parent.parent
 if str(root_dir) not in sys.path:
     sys.path.insert(0, str(root_dir))
 
-import mediapipe as mp
 from pose_analysis import (
     MODEL_PATH,
     ensure_model_file,
@@ -284,7 +289,10 @@ def extract_features_for_interval(
     quality_scores = []
     sample_interval = 1.0 / sample_fps
     next_sample_time = start_sec
-    frame_idx = 0
+    # Seek directly to the reviewed interval instead of decoding the full source
+    # from the beginning for every event in long match recordings.
+    frame_idx = max(0, int(round(start_sec * source_fps)))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
 
     with PoseLandmarker.create_from_options(options) as landmarker:
         while True:
@@ -421,7 +429,7 @@ def run_dataset_extraction(args: argparse.Namespace) -> int:
     # Execute extraction
     extracted_rows = []
     skipped_intervals = []
-    intervals_by_video: Dict[str, List[Tuple[float, float]]] = {}
+    intervals_by_video: Dict[str, List[Tuple[float, float, str]]] = {}
 
     for idx, r in enumerate(verified_records, start=1):
         r_id = r.get("review_id", f"REV_{idx}")
@@ -442,10 +450,26 @@ def run_dataset_extraction(args: argparse.Namespace) -> int:
         if v_name not in intervals_by_video:
             intervals_by_video[v_name] = []
 
-        if check_interval_overlap(intervals_by_video[v_name], s_time, e_time, max_overlap_sec=0.4):
-            skipped_intervals.append((r_id, v_name, s_time, e_time, "Duplicate/overlapping interval (>0.4s)"))
-            print(f"  [{idx}/{len(verified_records)}] ⚠️ {r_id}: Skipped due to overlap in {v_name}")
+        same_class_intervals = [
+            (start, end)
+            for start, end, movement_class in intervals_by_video[v_name]
+            if movement_class == v_class
+        ]
+        if check_interval_overlap(same_class_intervals, s_time, e_time, max_overlap_sec=0.4):
+            skipped_intervals.append((r_id, v_name, s_time, e_time, "Duplicate/overlapping interval (>0.4s) with same reviewed class"))
+            print(f"  [{idx}/{len(verified_records)}] ⚠️ {r_id}: Skipped as a same-class duplicate/overlap in {v_name}")
             continue
+
+        different_class_overlaps = [
+            movement_class
+            for start, end, movement_class in intervals_by_video[v_name]
+            if movement_class != v_class and min(e_time, end) - max(s_time, start) > 0.0
+        ]
+        if different_class_overlaps:
+            print(
+                f"  [{idx}/{len(verified_records)}] ⚠️ {r_id}: Retaining human-reviewed {v_class} interval "
+                f"with {different_class_overlaps} time overlap in {v_name}."
+            )
 
         print(f"  [{idx}/{len(verified_records)}] ⏳ Extracting {r_id} ({v_class}) from {v_name} [{s_time:.2f}s - {e_time:.2f}s]...", end="", flush=True)
 
@@ -462,7 +486,7 @@ def run_dataset_extraction(args: argparse.Namespace) -> int:
             print(f" ❌ Failed ({err})")
             continue
 
-        intervals_by_video[v_name].append((s_time, e_time))
+        intervals_by_video[v_name].append((s_time, e_time, v_class))
 
         # Build output row
         v_stem = Path(v_name).stem

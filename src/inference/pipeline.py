@@ -4,6 +4,8 @@ import subprocess
 import tempfile
 import cv2
 import numpy as np
+import sys
+sys.modules.setdefault("sounddevice", None)
 import mediapipe as mp
 
 from pose_analysis import MODEL_PATH, ensure_model_file, extract_pose_features

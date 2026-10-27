@@ -23,6 +23,11 @@ class MovementEventRecord:
     localization_method: str = "legacy_unknown"  # candidate_detector, whole_video_fallback, legacy_unknown
     detection_status: str = "PROPOSED"  # PROPOSED, ACCEPTED, REJECTED, UNCERTAIN
     representative_frame: str = ""  # path to keyframe image
+    representative_timestamp: Optional[float] = None  # source-video timestamp of selected image
+    representative_frame_index: Optional[int] = None  # zero-based source-video frame index
+    kinematic_peak_timestamp: Optional[float] = None  # source-video timestamp; None when unsupported
+    kinematic_peak_frame_index: Optional[int] = None
+    keyframe_selection_reason: str = ""
     clip_path: str = ""  # path to cut video clip
     pose_quality: float = 1.0
     feature_extraction_status: str = "SUCCESS"  # SUCCESS, PARTIAL, FAILED
@@ -32,10 +37,19 @@ class MovementEventRecord:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     risk_level: str = "UNASSESSED"  # PROVISIONAL, UNASSESSED, UNCERTAIN
     risk_observations: List[str] = field(default_factory=list)
+    risk_missing_evidence: str = ""
+    risk_score: Optional[float] = None
+    risk_category: str = "UNASSESSED"
+    risk_contributions: List[Dict[str, Any]] = field(default_factory=list)
     features: Dict[str, Any] = field(default_factory=dict)
     probabilities: Optional[Dict[str, float]] = None
     prediction_source: str = "unavailable"  # trained_model, heuristic, unavailable
     player_id: Optional[str] = None
+    lower_body_quality: Optional[float] = None
+    detector_proposal: Optional[str] = None
+    detector_metrics: Dict[str, Any] = field(default_factory=dict)
+    classifier_prediction: Optional[str] = None
+    classification_note: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

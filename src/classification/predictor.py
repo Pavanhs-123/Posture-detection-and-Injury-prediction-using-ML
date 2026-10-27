@@ -132,7 +132,7 @@ class MovementClassifier:
                 prediction_source="unavailable",
                 probabilities=None,
                 is_trained_model=False,
-                status_message="Features dictionary empty or invalid.",
+                status_message=f"Classifier unavailable: {err}",
             )
 
         x = self._prepare_vector(features)
